@@ -1,8 +1,8 @@
 package com.travel.travel_system;
 
-import com.travel.travel_system.model.dto.RoadEdge;
-import com.travel.travel_system.model.dto.RoadNetwork;
-import com.travel.travel_system.model.dto.RoadNode;
+import com.travel.travel_system.dto.RoadEdge;
+import com.travel.travel_system.dto.RoadNetwork;
+import com.travel.travel_system.dto.RoadNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 

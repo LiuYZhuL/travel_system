@@ -1,15 +1,11 @@
 package com.travel.travel_system;
 
-import com.travel.travel_system.model.dto.RoadEdge;
-import com.travel.travel_system.model.dto.RoadNetwork;
 import com.travel.travel_system.service.pub.RoadNetworkService;
-import com.travel.travel_system.utils.OsmPbfParser;
 import com.travel.travel_system.utils.RoadNetworkCoverageInspector;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
-import java.util.List;
 @SpringBootTest
 public class RoadNetworkDataTest {
 

@@ -1,8 +1,8 @@
 package com.travel.travel_system.utils;
 
 import com.travel.travel_system.model.TrackPoint;
-import com.travel.travel_system.model.dto.RoadEdge;
-import com.travel.travel_system.model.dto.RoadNetwork;
+import com.travel.travel_system.dto.RoadEdge;
+import com.travel.travel_system.dto.RoadNetwork;
 import com.travel.travel_system.service.pub.RoadNetworkService;
 import lombok.Data;
 import org.springframework.stereotype.Component;

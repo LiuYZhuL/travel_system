@@ -1,7 +1,7 @@
 package com.travel.travel_system.service;
 
 import com.travel.travel_system.model.TrackPoint;
-import com.travel.travel_system.model.dto.MapMatchingResult;
+import com.travel.travel_system.dto.MapMatchingResult;
 import com.travel.travel_system.vo.TrackPolylineVO;
 
 import java.util.*;

@@ -1,9 +1,9 @@
 package com.travel.travel_system.utils;
 
-import com.travel.travel_system.model.dto.GeoPoint;
-import com.travel.travel_system.model.dto.RoadEdge;
-import com.travel.travel_system.model.dto.RoadNetwork;
-import com.travel.travel_system.model.dto.RoadNode;
+import com.travel.travel_system.dto.GeoPoint;
+import com.travel.travel_system.dto.RoadEdge;
+import com.travel.travel_system.dto.RoadNetwork;
+import com.travel.travel_system.dto.RoadNode;
 import org.openstreetmap.osmosis.core.container.v0_6.EntityContainer;
 import org.openstreetmap.osmosis.core.domain.v0_6.Node;
 import org.openstreetmap.osmosis.core.domain.v0_6.Tag;

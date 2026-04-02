@@ -1,8 +1,7 @@
 package com.travel.travel_system.service.pub;
 
-import com.travel.travel_system.model.dto.RoadNetwork;
+import com.travel.travel_system.dto.RoadNetwork;
 import com.travel.travel_system.utils.OsmPbfParser;
-import com.travel.travel_system.utils.RoadNetworkSerializer;
 import org.springframework.stereotype.Service;
 
 import java.util.Collections;

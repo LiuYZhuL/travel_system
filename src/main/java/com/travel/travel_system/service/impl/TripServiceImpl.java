@@ -1,7 +1,7 @@
 package com.travel.travel_system.service.impl;
 
 import com.travel.travel_system.model.*;
-import com.travel.travel_system.model.dto.MapMatchingResult;
+import com.travel.travel_system.dto.MapMatchingResult;
 import com.travel.travel_system.model.enums.BlockType;
 import com.travel.travel_system.model.enums.CoordType;
 import com.travel.travel_system.model.enums.PrivacyMode;
@@ -21,7 +21,6 @@ import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.nio.ByteBuffer;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.*;

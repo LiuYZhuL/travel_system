@@ -1,8 +1,9 @@
 package com.travel.travel_system;
 
+import com.travel.travel_system.dto.RoadEdge;
 import com.travel.travel_system.model.TrackPoint;
-import com.travel.travel_system.model.dto.MapMatchingResult;
-import com.travel.travel_system.model.dto.RoadNetwork;
+import com.travel.travel_system.dto.MapMatchingResult;
+import com.travel.travel_system.dto.RoadNetwork;
 import com.travel.travel_system.service.TrackPointService;
 import com.travel.travel_system.service.pub.RoadNetworkService;
 import org.junit.jupiter.api.BeforeEach;
@@ -60,7 +61,7 @@ public class MapMatchingIntegrationTest {
         RoadNetwork roadNetwork = roadNetworkService.getRoadNetwork(testLat, testLon, radiusKm);
         
         double searchRadius = 40.0;
-        List<com.travel.travel_system.model.dto.RoadEdge> candidateRoads = 
+        List<RoadEdge> candidateRoads =
             roadNetwork.findNearbyEdges(testLat, testLon, searchRadius);
         
         System.out.println("候选路段检索成功!");
@@ -69,7 +70,7 @@ public class MapMatchingIntegrationTest {
         System.out.println("找到候选路段数量: " + candidateRoads.size());
         
         for (int i = 0; i < Math.min(5, candidateRoads.size()); i++) {
-            com.travel.travel_system.model.dto.RoadEdge road = candidateRoads.get(i);
+            RoadEdge road = candidateRoads.get(i);
             System.out.println("  路段 " + (i + 1) + ": ID=" + road.getId() + 
                              ", 名称=" + road.getName() + 
                              ", 方向=" + road.getDirection());

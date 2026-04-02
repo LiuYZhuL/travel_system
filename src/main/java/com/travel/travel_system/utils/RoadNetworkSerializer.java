@@ -1,6 +1,6 @@
 package com.travel.travel_system.utils;
 
-import com.travel.travel_system.model.dto.RoadNetwork;
+import com.travel.travel_system.dto.RoadNetwork;
 
 import java.io.*;
 import java.nio.file.Files;
