@@ -472,6 +472,25 @@ public class TripServiceImpl implements TripService {
         return data;
     }
 
+    @Override
+    public Map<String, Object> getUserTripStats(Long userId) {
+        long tripCount = tripRepository.countByUserId(userId);
+        Long totalDistanceM = tripRepository.sumDistanceByUserId(userId);
+        Long totalDurationSec = tripRepository.sumDurationByUserId(userId);
+        Integer totalPhotoCount = tripRepository.sumPhotoCountByUserId(userId);
+        Integer totalVideoCount = tripRepository.sumVideoCountByUserId(userId);
+
+        Map<String, Object> stats = new LinkedHashMap<>();
+        stats.put("tripCount", tripCount);
+        stats.put("totalDistanceM", totalDistanceM != null ? totalDistanceM : 0L);
+        stats.put("totalDistanceText", formatDistance(totalDistanceM));
+        stats.put("totalDurationSec", totalDurationSec != null ? totalDurationSec : 0L);
+        stats.put("totalDurationText", formatDuration(totalDurationSec));
+        stats.put("totalPhotoCount", totalPhotoCount != null ? totalPhotoCount : 0);
+        stats.put("totalVideoCount", totalVideoCount != null ? totalVideoCount : 0);
+        return stats;
+    }
+
     private void ensureGeneratedArtifacts(Long tripId) {
         if (storyBlockRepository.countByTripId(tripId) == 0) {
             try { aiService.rebuildStoryBlocks(tripId); } catch (Exception ignored) {}

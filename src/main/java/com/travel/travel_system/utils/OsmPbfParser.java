@@ -19,18 +19,35 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 基于 osmosis-core / osmosis-pbf2 的 OSM PBF 解析器。
- * 核心改动：按相邻 OSM shape node 切边，而不是把整条 way 粗化成一条直线边。
+ *
+ * 关键修复：
+ * 旧实现先按 bbox 收集 node，再按 node 是否存在来建边，导致大量“只有一端 node 落在 bbox 内”的有效 segment 被裁掉。
+ *
+ * 新实现改为 4 遍：
+ * 1) 收集 bbox+buffer 内的 seed nodes
+ * 2) 用 seed nodes 找出相关 vehicle ways，并收集这些 way 的全部 nodeId
+ * 3) 再按 nodeId 回填这些 way 所需的全部 node 坐标
+ * 4) 最后真正建边，并按 bbox.segmentMayIntersect(...) 做几何裁剪
  */
 public class OsmPbfParser {
 
-    /**
-     * 改为“排除明显非机动车/非通行道路”，避免立交连接道因 highway 类型不在白名单而被过滤掉。
-     */
     private static final Set<String> EXCLUDED_HIGHWAY_TYPES = new HashSet<>(Arrays.asList(
             "footway", "cycleway", "path", "steps", "pedestrian", "bridleway",
-            "corridor", "platform", "elevator", "proposed", "construction"
+            "corridor", "platform", "elevator", "proposed"
     ));
 
+    private static final Set<String> MOTOR_VEHICLE_HIGHWAY_TYPES = new HashSet<>(Arrays.asList(
+            "motorway", "motorway_link",
+            "trunk", "trunk_link",
+            "primary", "primary_link",
+            "secondary", "secondary_link",
+            "tertiary", "tertiary_link",
+            "unclassified", "residential", "service", "living_street", "track"
+    ));
+
+    /**
+     * seed node 只用于“命中相关 way”的第一轮粗筛，适当放大即可。
+     */
     private static final double NODE_BBOX_BUFFER_KM = 4.0;
 
     public static RoadNetwork parseFromResource(String resourcePath,
@@ -39,18 +56,32 @@ public class OsmPbfParser {
                                                 double radiusKm) {
         BBox bbox = buildBBox(centerLat, centerLon, radiusKm, NODE_BBOX_BUFFER_KM);
 
-        Map<Long, NodeCoord> nodeCache = new HashMap<>(200_000);
+        Map<Long, NodeCoord> seedNodeCache = new HashMap<>(200_000);
         try (InputStream firstPass = openResource(resourcePath)) {
-            collectNodes(firstPass, bbox, nodeCache);
+            collectSeedNodes(firstPass, bbox, seedNodeCache);
         } catch (IOException e) {
-            throw new RuntimeException("读取 PBF 第一遍失败: " + resourcePath, e);
+            throw new RuntimeException("读取 PBF 第一遍(seed nodes)失败: " + resourcePath, e);
+        }
+
+        Set<Long> relevantNodeIds = new HashSet<>(Math.max(seedNodeCache.size() * 4, 16_384));
+        try (InputStream secondPass = openResource(resourcePath)) {
+            collectRelevantWayNodeIds(secondPass, seedNodeCache.keySet(), relevantNodeIds);
+        } catch (IOException e) {
+            throw new RuntimeException("读取 PBF 第二遍(ways -> node ids)失败: " + resourcePath, e);
+        }
+
+        Map<Long, NodeCoord> nodeCache = new HashMap<>(Math.max(relevantNodeIds.size() + 1024, 16_384));
+        try (InputStream thirdPass = openResource(resourcePath)) {
+            collectRequiredNodes(thirdPass, relevantNodeIds, nodeCache);
+        } catch (IOException e) {
+            throw new RuntimeException("读取 PBF 第三遍(required nodes)失败: " + resourcePath, e);
         }
 
         RoadNetwork network = new RoadNetwork();
-        try (InputStream secondPass = openResource(resourcePath)) {
-            buildNetwork(secondPass, bbox, nodeCache, network);
+        try (InputStream fourthPass = openResource(resourcePath)) {
+            buildNetwork(fourthPass, bbox, nodeCache, network);
         } catch (IOException e) {
-            throw new RuntimeException("读取 PBF 第二遍失败: " + resourcePath, e);
+            throw new RuntimeException("读取 PBF 第四遍(build network)失败: " + resourcePath, e);
         }
 
         network.rebuildAdjacencyList();
@@ -68,35 +99,138 @@ public class OsmPbfParser {
         return in;
     }
 
-    private static void collectNodes(InputStream inputStream,
-                                     BBox bbox,
-                                     Map<Long, NodeCoord> nodeCache) {
+    private static void collectSeedNodes(InputStream inputStream,
+                                         BBox bbox,
+                                         Map<Long, NodeCoord> nodeCache) {
+        AtomicLong totalNodes = new AtomicLong();
+        AtomicLong keptNodes = new AtomicLong();
+
         PbfReader reader = new PbfReader(() -> inputStream, 1);
         reader.setSink(new Sink() {
-            @Override
-            public void initialize(Map<String, Object> metaData) {
-            }
+            @Override public void initialize(Map<String, Object> metaData) {}
 
             @Override
             public void process(EntityContainer entityContainer) {
                 if (entityContainer.getEntity() instanceof Node node) {
+                    totalNodes.incrementAndGet();
                     double lat = node.getLatitude();
                     double lon = node.getLongitude();
                     if (bbox.contains(lat, lon)) {
                         nodeCache.put(node.getId(), new NodeCoord(lat, lon));
+                        keptNodes.incrementAndGet();
                     }
                 }
             }
 
-            @Override
-            public void complete() {
-            }
-
-            @Override
-            public void close() {
-            }
+            @Override public void complete() {}
+            @Override public void close() {}
         });
         reader.run();
+
+        System.out.println("[OSM_PBF_NODES] total=" + totalNodes.get()
+                + ", keptInBBox=" + keptNodes.get()
+                + ", bbox=" + bbox);
+    }
+
+    private static void collectRelevantWayNodeIds(InputStream inputStream,
+                                                  Set<Long> seedNodeIds,
+                                                  Set<Long> relevantNodeIds) {
+        AtomicLong totalWays = new AtomicLong();
+        AtomicLong vehicleWays = new AtomicLong();
+        AtomicLong relevantWays = new AtomicLong();
+        AtomicLong collectedRefs = new AtomicLong();
+        Map<String, AtomicLong> highwayTypeCounts = new HashMap<>();
+
+        PbfReader reader = new PbfReader(() -> inputStream, 1);
+        reader.setSink(new Sink() {
+            @Override public void initialize(Map<String, Object> metaData) {}
+
+            @Override
+            public void process(EntityContainer entityContainer) {
+                if (!(entityContainer.getEntity() instanceof Way way)) {
+                    return;
+                }
+                totalWays.incrementAndGet();
+
+                Map<String, String> tags = readTags(way.getTags());
+                String highway = tags.get("highway");
+                String effectiveHighway = normalizeHighwayType(highway, tags);
+                if (effectiveHighway == null || !isVehicleHighway(highway, tags)) {
+                    return;
+                }
+                vehicleWays.incrementAndGet();
+                highwayTypeCounts.computeIfAbsent(effectiveHighway, k -> new AtomicLong()).incrementAndGet();
+
+                boolean relevant = false;
+                for (WayNode wayNode : way.getWayNodes()) {
+                    if (seedNodeIds.contains(wayNode.getNodeId())) {
+                        relevant = true;
+                        break;
+                    }
+                }
+                if (!relevant) {
+                    return;
+                }
+
+                relevantWays.incrementAndGet();
+                for (WayNode wayNode : way.getWayNodes()) {
+                    if (relevantNodeIds.add(wayNode.getNodeId())) {
+                        collectedRefs.incrementAndGet();
+                    }
+                }
+            }
+
+            @Override public void complete() {}
+            @Override public void close() {}
+        });
+        reader.run();
+
+        System.out.println("[OSM_PBF_WAYS] totalWays=" + totalWays.get()
+                + ", vehicleWays=" + vehicleWays.get()
+                + ", relevantWays=" + relevantWays.get()
+                + ", requiredNodeIds=" + relevantNodeIds.size()
+                + ", uniqueAddedRefs=" + collectedRefs.get());
+
+        if (!highwayTypeCounts.isEmpty()) {
+            List<Map.Entry<String, AtomicLong>> entries = new ArrayList<>(highwayTypeCounts.entrySet());
+            entries.sort((a, b) -> Long.compare(b.getValue().get(), a.getValue().get()));
+            int limit = Math.min(12, entries.size());
+            for (int i = 0; i < limit; i++) {
+                Map.Entry<String, AtomicLong> e = entries.get(i);
+                System.out.println("[OSM_PBF_WAYS] highwayType=" + e.getKey() + ", ways=" + e.getValue().get());
+            }
+        }
+    }
+
+    private static void collectRequiredNodes(InputStream inputStream,
+                                             Set<Long> requiredNodeIds,
+                                             Map<Long, NodeCoord> nodeCache) {
+        AtomicLong totalNodes = new AtomicLong();
+        AtomicLong keptNodes = new AtomicLong();
+
+        PbfReader reader = new PbfReader(() -> inputStream, 1);
+        reader.setSink(new Sink() {
+            @Override public void initialize(Map<String, Object> metaData) {}
+
+            @Override
+            public void process(EntityContainer entityContainer) {
+                if (entityContainer.getEntity() instanceof Node node) {
+                    totalNodes.incrementAndGet();
+                    if (requiredNodeIds.contains(node.getId())) {
+                        nodeCache.put(node.getId(), new NodeCoord(node.getLatitude(), node.getLongitude()));
+                        keptNodes.incrementAndGet();
+                    }
+                }
+            }
+
+            @Override public void complete() {}
+            @Override public void close() {}
+        });
+        reader.run();
+
+        System.out.println("[OSM_PBF_REQUIRED_NODES] required=" + requiredNodeIds.size()
+                + ", loaded=" + keptNodes.get()
+                + ", totalNodes=" + totalNodes.get());
     }
 
     private static void buildNetwork(InputStream inputStream,
@@ -105,40 +239,60 @@ public class OsmPbfParser {
                                      RoadNetwork network) {
         AtomicLong edgeIdSeed = new AtomicLong(1L);
         Map<Long, Integer> degreeCounter = new HashMap<>();
+        AtomicLong totalWays = new AtomicLong();
+        AtomicLong vehicleWays = new AtomicLong();
+        AtomicLong totalSegments = new AtomicLong();
+        AtomicLong keptSegments = new AtomicLong();
+        AtomicLong missingNodeSegments = new AtomicLong();
+        AtomicLong outsideBBoxSegments = new AtomicLong();
+        AtomicLong bridgeEdges = new AtomicLong();
+        AtomicLong tunnelEdges = new AtomicLong();
+        AtomicLong layeredEdges = new AtomicLong();
+        AtomicLong rampEdges = new AtomicLong();
+        Map<String, AtomicLong> highwayTypeCounts = new HashMap<>();
 
         PbfReader reader = new PbfReader(() -> inputStream, 1);
         reader.setSink(new Sink() {
-            @Override
-            public void initialize(Map<String, Object> metaData) {
-            }
+            @Override public void initialize(Map<String, Object> metaData) {}
 
             @Override
             public void process(EntityContainer entityContainer) {
                 if (!(entityContainer.getEntity() instanceof Way way)) {
                     return;
                 }
+                totalWays.incrementAndGet();
 
                 Map<String, String> tags = readTags(way.getTags());
                 String highway = tags.get("highway");
-                if (highway == null || !isVehicleHighway(highway, tags)) {
+                String effectiveHighway = normalizeHighwayType(highway, tags);
+                if (effectiveHighway == null || !isVehicleHighway(highway, tags)) {
                     return;
                 }
+                vehicleWays.incrementAndGet();
+                highwayTypeCounts.computeIfAbsent(effectiveHighway, k -> new AtomicLong()).incrementAndGet();
 
                 boolean oneWay = isOneWay(tags);
                 int maxSpeed = parseMaxSpeed(tags.get("maxspeed"));
                 String name = tags.getOrDefault("name", "未命名道路");
+                int layerLevel = parseLayer(tags);
+                boolean bridge = isBridge(tags);
+                boolean tunnel = isTunnel(tags);
+                boolean rampLike = isRampLike(highway, tags);
 
                 List<WayNode> wayNodes = way.getWayNodes();
                 for (int i = 0; i < wayNodes.size() - 1; i++) {
+                    totalSegments.incrementAndGet();
                     long startNodeId = wayNodes.get(i).getNodeId();
                     long endNodeId = wayNodes.get(i + 1).getNodeId();
                     NodeCoord start = nodeCache.get(startNodeId);
                     NodeCoord end = nodeCache.get(endNodeId);
                     if (start == null || end == null) {
+                        missingNodeSegments.incrementAndGet();
                         continue;
                     }
 
                     if (!bbox.segmentMayIntersect(start.lat, start.lon, end.lat, end.lon)) {
+                        outsideBBoxSegments.incrementAndGet();
                         continue;
                     }
 
@@ -160,34 +314,55 @@ public class OsmPbfParser {
                     edge.setSourceWayId(way.getId());
                     edge.setSegmentIndex(i);
                     edge.setName(name);
-                    edge.setType(highway);
+                    edge.setType(effectiveHighway);
                     edge.setOneWay(oneWay);
                     edge.setMaxSpeed(maxSpeed);
-                    edge.setLayerLevel(parseLayer(tags));
-                    edge.setBridge(isBridge(tags));
-                    edge.setTunnel(isTunnel(tags));
-                    edge.setRampLike(isRampLike(highway, tags));
+                    edge.setLayerLevel(layerLevel);
+                    edge.setBridge(bridge);
+                    edge.setTunnel(tunnel);
+                    edge.setRampLike(rampLike);
                     edge.setShapePoints(Arrays.asList(
                             new GeoPoint(start.lat, start.lon),
                             new GeoPoint(end.lat, end.lon)
                     ));
                     edge.refreshGeometry();
                     network.addEdge(edge);
+                    keptSegments.incrementAndGet();
+                    if (bridge) bridgeEdges.incrementAndGet();
+                    if (tunnel) tunnelEdges.incrementAndGet();
+                    if (layerLevel != 0) layeredEdges.incrementAndGet();
+                    if (rampLike) rampEdges.incrementAndGet();
 
                     degreeCounter.merge(startNodeId, 1, Integer::sum);
                     degreeCounter.merge(endNodeId, 1, Integer::sum);
                 }
             }
 
-            @Override
-            public void complete() {
-            }
-
-            @Override
-            public void close() {
-            }
+            @Override public void complete() {}
+            @Override public void close() {}
         });
         reader.run();
+
+        System.out.println("[OSM_PBF_BUILD] totalWays=" + totalWays.get()
+                + ", vehicleWays=" + vehicleWays.get()
+                + ", totalSegments=" + totalSegments.get()
+                + ", keptSegments=" + keptSegments.get()
+                + ", missingNodeSegments=" + missingNodeSegments.get()
+                + ", outsideBBoxSegments=" + outsideBBoxSegments.get()
+                + ", bridgeEdges=" + bridgeEdges.get()
+                + ", tunnelEdges=" + tunnelEdges.get()
+                + ", layeredEdges=" + layeredEdges.get()
+                + ", rampEdges=" + rampEdges.get());
+
+        if (!highwayTypeCounts.isEmpty()) {
+            List<Map.Entry<String, AtomicLong>> entries = new ArrayList<>(highwayTypeCounts.entrySet());
+            entries.sort((a, b) -> Long.compare(b.getValue().get(), a.getValue().get()));
+            int limit = Math.min(12, entries.size());
+            for (int i = 0; i < limit; i++) {
+                Map.Entry<String, AtomicLong> e = entries.get(i);
+                System.out.println("[OSM_PBF_BUILD] highwayType=" + e.getKey() + ", ways=" + e.getValue().get());
+            }
+        }
 
         for (RoadEdge edge : network.getEdges()) {
             int degree = Math.max(
@@ -221,9 +396,18 @@ public class OsmPbfParser {
         if (highway == null) {
             return false;
         }
-        if (EXCLUDED_HIGHWAY_TYPES.contains(highway)) {
+
+        String effectiveHighway = normalizeHighwayType(highway, tags);
+        if (effectiveHighway == null) {
             return false;
         }
+        if (EXCLUDED_HIGHWAY_TYPES.contains(effectiveHighway)) {
+            return false;
+        }
+        if (!MOTOR_VEHICLE_HIGHWAY_TYPES.contains(effectiveHighway)) {
+            return false;
+        }
+
         String motorVehicle = tags.get("motor_vehicle");
         if ("no".equalsIgnoreCase(motorVehicle)) {
             return false;
@@ -233,6 +417,26 @@ public class OsmPbfParser {
             return false;
         }
         return true;
+    }
+
+    private static String normalizeHighwayType(String highway, Map<String, String> tags) {
+        if (highway == null || highway.isBlank()) {
+            return null;
+        }
+        String normalized = highway.trim();
+        if (!"construction".equalsIgnoreCase(normalized)) {
+            return normalized;
+        }
+
+        String construction = tags.get("construction");
+        if (construction == null || construction.isBlank()) {
+            return null;
+        }
+        String subtype = construction.trim();
+        if (!MOTOR_VEHICLE_HIGHWAY_TYPES.contains(subtype)) {
+            return null;
+        }
+        return subtype;
     }
 
     private static Map<String, String> readTags(Collection<Tag> tags) {

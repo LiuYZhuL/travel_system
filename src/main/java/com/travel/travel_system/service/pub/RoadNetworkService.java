@@ -114,6 +114,7 @@ public class RoadNetworkService {
     public RoadNetwork getRoadNetwork(double lat, double lon, double radiusKm) {
 
         System.out.println("RoadNetworkService.getRoadNetwork lat=" + lat + ", lon=" + lon + ", radiusKm=" + radiusKm);
+        System.out.println("[ROAD_NETWORK_LOAD] request center=(" + lat + "," + lon + ") radiusKm=" + radiusKm);
         return loadFromPbf(lat, lon, radiusKm);
 
 
@@ -187,12 +188,19 @@ public class RoadNetworkService {
 
         if (provinceFile != null) {
             System.out.println("检测到省份区域，尝试加载省份路网: " + provinceFile);
+            System.out.println("[ROAD_NETWORK_LOAD] provinceFile=" + provinceFile + " center=(" + lat + "," + lon + ") radiusKm=" + radiusKm);
             try {
                 roadNetwork = OsmPbfParser.parseFromResource(PBF_BASE_PATH + provinceFile, lat, lon, radiusKm);
+                if (roadNetwork != null) {
+                    System.out.println("[ROAD_NETWORK_LOAD] province result nodes=" + roadNetwork.getNodeCount() + ", edges=" + roadNetwork.getEdgeCount());
+                }
                 if (isSparseUrbanNetwork(roadNetwork, radiusKm)) {
                     double retryRadiusKm = radiusKm * SPARSE_RETRY_RADIUS_FACTOR;
                     System.out.println("省份路网过稀，扩大半径重试: " + retryRadiusKm + "km");
                     RoadNetwork retried = OsmPbfParser.parseFromResource(PBF_BASE_PATH + provinceFile, lat, lon, retryRadiusKm);
+                    if (retried != null) {
+                        System.out.println("[ROAD_NETWORK_LOAD] province retry result nodes=" + retried.getNodeCount() + ", edges=" + retried.getEdgeCount());
+                    }
                     if (retried != null && retried.getEdgeCount() > roadNetwork.getEdgeCount()) {
                         roadNetwork = retried;
                     }
@@ -205,7 +213,11 @@ public class RoadNetworkService {
 
         if (roadNetwork == null || roadNetwork.getEdgeCount() == 0 || isSparseUrbanNetwork(roadNetwork, radiusKm)) {
             System.out.println("省份路网未找到/为空/过稀，加载全国路网");
+            System.out.println("[ROAD_NETWORK_LOAD] fallback=national radiusKm=" + (radiusKm * SPARSE_RETRY_RADIUS_FACTOR));
             RoadNetwork national = OsmPbfParser.parseFromResource(CHINA_OSM_RESOURCE_PATH, lat, lon, radiusKm * SPARSE_RETRY_RADIUS_FACTOR);
+            if (national != null) {
+                System.out.println("[ROAD_NETWORK_LOAD] national result nodes=" + national.getNodeCount() + ", edges=" + national.getEdgeCount());
+            }
             if (national != null && (roadNetwork == null || national.getEdgeCount() >= roadNetwork.getEdgeCount())) {
                 roadNetwork = national;
             }
@@ -213,6 +225,7 @@ public class RoadNetworkService {
 
         if (roadNetwork != null) {
             System.out.println("最终路网: nodes=" + roadNetwork.getNodeCount() + ", edges=" + roadNetwork.getEdgeCount());
+            System.out.println("[ROAD_NETWORK_LOAD] final nodes=" + roadNetwork.getNodeCount() + ", edges=" + roadNetwork.getEdgeCount() + ", sparse=" + isSparseUrbanNetwork(roadNetwork, radiusKm));
         }
         return roadNetwork;
     }

@@ -330,7 +330,70 @@ public class RoadNetwork implements Serializable {
         }
 
         nearbyEdgeCache.put(cacheKey, new ArrayList<>(nearby));
+        logNearbyEdgeDiagnostics(lat, lon, radius, nearby);
         return nearby;
+    }
+
+    private void logNearbyEdgeDiagnostics(double lat, double lon, double radius, List<RoadEdge> nearby) {
+        double bestNearby = Double.POSITIVE_INFINITY;
+        for (RoadEdge edge : nearby) {
+            bestNearby = Math.min(bestNearby, edge.distanceToPolyline(lat, lon));
+        }
+
+        boolean suspicious = nearby.isEmpty() || bestNearby > 20.0;
+        if (!suspicious || (radius < 80.0 && !nearby.isEmpty())) {
+            return;
+        }
+
+        List<Map.Entry<RoadEdge, Double>> nearest = new ArrayList<>();
+        for (RoadEdge edge : edgeList) {
+            nearest.add(new AbstractMap.SimpleEntry<>(edge, edge.distanceToPolyline(lat, lon)));
+        }
+        nearest.sort(Comparator.comparingDouble(Map.Entry::getValue));
+
+        System.out.println(String.format(
+                Locale.ROOT,
+                "[ROAD_NETWORK_DIAG] query=(%.6f,%.6f) radius=%.1f nearbyCount=%d bestNearby=%.2f totalEdges=%d",
+                lat,
+                lon,
+                radius,
+                nearby.size(),
+                bestNearby,
+                edgeList.size()
+        ));
+
+        int limit = Math.min(8, nearest.size());
+        for (int i = 0; i < limit; i++) {
+            RoadEdge edge = nearest.get(i).getKey();
+            double distance = nearest.get(i).getValue();
+            System.out.println(String.format(
+                    Locale.ROOT,
+                    "[ROAD_NETWORK_DIAG] rank=%d dist=%.2f road=%s|%s|layer=%d|bridge=%s|tunnel=%s|ramp=%s|len=%.1f|way=%s|seg=%s|shapePts=%d start=(%.6f,%.6f) end=(%.6f,%.6f)",
+                    i,
+                    distance,
+                    safeRoadName(edge),
+                    edge.getType(),
+                    edge.getLayerLevel(),
+                    edge.isBridge(),
+                    edge.isTunnel(),
+                    edge.isRampLike(),
+                    edge.getLengthM(),
+                    String.valueOf(edge.getSourceWayId()),
+                    String.valueOf(edge.getSegmentIndex()),
+                    edge.getShapePoints().size(),
+                    edge.getStartLat(),
+                    edge.getStartLon(),
+                    edge.getEndLat(),
+                    edge.getEndLon()
+            ));
+        }
+    }
+
+    private String safeRoadName(RoadEdge edge) {
+        if (edge == null || edge.getName() == null || edge.getName().trim().isEmpty()) {
+            return "<unnamed>";
+        }
+        return edge.getName().trim();
     }
 
     public boolean isInRoadNetwork(double lat, double lon, double radius) {

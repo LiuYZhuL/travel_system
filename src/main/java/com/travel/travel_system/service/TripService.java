@@ -59,4 +59,6 @@ public interface TripService {
     Integer uploadTrackPoints(Long userId, Long tripId, List<Map<String, Object>> points);
 
     Map<String, Object> getTrackStatus(Long userId, Long tripId);
+
+    Map<String, Object> getUserTripStats(Long userId);
 }

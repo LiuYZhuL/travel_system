@@ -249,9 +249,6 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         }
 
         List<List<CandidatePoint>> candidateLists = buildCandidateLists(segment.getPoints(), roadNetwork, COMPLEX_MAX_CANDIDATES);
-        if (segment.getPoints().size() > MAX_SECOND_ORDER_SEGMENT_POINTS) {
-            return runFirstOrderViterbi(segment.getPoints(), candidateLists, roadNetwork, segment.getStartWindowIndex());
-        }
         return runSecondOrderViterbi(segment, candidateLists, roadNetwork);
     }
 
@@ -325,7 +322,6 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
                 continue;
             }
             double observation = calculateObservationProbability(projection.getDistanceMeters(), theta, road) * observationPenalty;
-            observation *= structureObservationFactor(point, road, projection.getDistanceMeters(), theta);
             CandidatePoint candidate = new CandidatePoint(point, road,
                     projection.getLat(), projection.getLon(),
                     projection.getDistanceMeters(), theta,
@@ -521,8 +517,10 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         for (int i = 0; i < c0.size(); i++) {
             for (int j = 0; j < c1.size(); j++) {
                 double pairObservation = calculateSecondOrderObservationProbability(c0.get(i), c1.get(j), gc01, roadNetwork);
+                double initPairFactor = calculatePairLayerContinuityFactor(c0.get(i), c1.get(j), roadNetwork, true, "INIT");
                 prevLayer[i][j] = Math.log(Math.max(initialProbs[i], MIN_PROB))
-                        + Math.log(Math.max(pairObservation, MIN_PROB));
+                        + Math.log(Math.max(pairObservation, MIN_PROB))
+                        + Math.log(Math.max(initPairFactor, MIN_PROB));
             }
         }
 
@@ -610,48 +608,7 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
     }
 
     private int[] smoothLayerFlips(List<List<CandidatePoint>> candidateLists, int[] selected) {
-        if (candidateLists == null || selected == null || selected.length < 3) {
-            return selected;
-        }
-        int[] adjusted = Arrays.copyOf(selected, selected.length);
-        int i = 0;
-        while (i < adjusted.length) {
-            CandidatePoint current = selectedCandidate(candidateLists, adjusted, i);
-            if (!isGroundLikeCandidate(current)) {
-                i++;
-                continue;
-            }
-            int runStart = i;
-            int runEnd = i;
-            while (runEnd + 1 < adjusted.length && isGroundLikeCandidate(selectedCandidate(candidateLists, adjusted, runEnd + 1))) {
-                runEnd++;
-            }
-
-            CandidatePoint left = runStart > 0 ? selectedCandidate(candidateLists, adjusted, runStart - 1) : null;
-            CandidatePoint right = runEnd + 1 < adjusted.length ? selectedCandidate(candidateLists, adjusted, runEnd + 1) : null;
-            if (!isStructureLikeCandidate(left) || !isStructureLikeCandidate(right) || !sameStructureFamily(left, right)) {
-                i = runEnd + 1;
-                continue;
-            }
-            if (runEnd - runStart + 1 > 5) {
-                i = runEnd + 1;
-                continue;
-            }
-
-            for (int k = runStart; k <= runEnd; k++) {
-                CandidatePoint ground = selectedCandidate(candidateLists, adjusted, k);
-                CandidatePoint replacement = findBestStructureFamilyCandidate(candidateLists.get(k), left, right, ground);
-                if (replacement == null) {
-                    continue;
-                }
-                int replacementIndex = indexOfCandidate(candidateLists.get(k), replacement);
-                if (replacementIndex >= 0) {
-                    adjusted[k] = replacementIndex;
-                }
-            }
-            i = runEnd + 1;
-        }
-        return adjusted;
+        return selected;
     }
 
     private CandidatePoint findBestStructureFamilyCandidate(List<CandidatePoint> layer,
@@ -785,8 +742,9 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         double sum = 0.0;
         for (int i = 0; i < firstCandidates.size(); i++) {
             CandidatePoint candidate = firstCandidates.get(i);
-            double thetaFactor = candidate.getThetaDegrees() < 0.0 ? 10.0 : Math.max(candidate.getThetaDegrees(), 5.0);
-            result[i] = 1.0 / (Math.max(candidate.getDistanceMeters(), 1.0) * thetaFactor);
+            double dj = Math.max(candidate.getDistanceMeters(), 1.0);
+            double dTheta = candidate.getThetaDegrees() < 0.0 ? 1.0 : Math.max(candidate.getThetaDegrees(), 1.0);
+            result[i] = 1.0 / (dj * dTheta);
             sum += result[i];
         }
         if (sum <= 0.0) {
@@ -849,56 +807,10 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         double dt = Math.abs(greatCircleDistance - routeDistance);
         double pDistance = Math.exp(-dt / ROUTE_BETA_METERS);
 
-        boolean sameRoad = sameRoad(from.getRoad(), to.getRoad());
-        boolean sameWay = sameWay(from.getRoad(), to.getRoad());
-        boolean shareNode = roadsShareNode(from.getRoad(), to.getRoad());
-
         double theta = roadToRoadDirectionDifference(from, to);
-        double angleLambda = ANGLE_LAMBDA;
-        if (sameWay || (shareNode && theta <= CURVE_CONTINUITY_ANGLE_DEGREES)) {
-            angleLambda *= 0.55;
-        }
-        double pTheta = Math.exp(-angleLambda * (theta / 180.0));
-
-        double continuityFactor = 1.0;
-        if (sameRoad) {
-            continuityFactor *= 1.15;
-        } else if (sameWay) {
-            continuityFactor *= 1.12;
-        } else if (shareNode && theta <= CURVE_CONTINUITY_ANGLE_DEGREES) {
-            continuityFactor *= CURVE_CONTINUITY_BONUS;
-        }
-
-        if (shareNode && areEdgesMutuallyConnected(from.getRoad(), to.getRoad())) {
-            continuityFactor *= 1.06;
-        }
-
-        if (!sameRoad && shareNode) {
-            if (theta >= INTERSECTION_SHARP_TURN_DEGREES
-                    && from.getDistanceMeters() <= 18.0
-                    && to.getDistanceMeters() <= 18.0) {
-                continuityFactor *= INTERSECTION_CROSSING_PENALTY;
-            } else if (theta <= 20.0) {
-                continuityFactor *= INTERSECTION_STRAIGHT_BONUS;
-            }
-        }
-
-        if (!sameRoad
-                && !sameWay
-                && !shareNode
-                && theta <= PARALLEL_ROAD_ANGLE_DEGREES
-                && from.getDistanceMeters() <= PARALLEL_ROAD_OBSERVATION_METERS
-                && to.getDistanceMeters() <= PARALLEL_ROAD_OBSERVATION_METERS) {
-            double roadSeparation = estimateParallelRoadSeparation(from, to);
-            if (roadSeparation >= PARALLEL_ROAD_SEPARATION_METERS) {
-                continuityFactor *= PARALLEL_ROAD_SWITCH_PENALTY;
-            }
-        }
-
-        continuityFactor *= sameRoadNameContinuityFactor(from, to);
-        continuityFactor *= corridorClassPenalty(from, to, greatCircleDistance, theta);
-        continuityFactor *= layerAwareTransitionFactor(from, to, greatCircleDistance);
-        return Math.max(pDistance * pTheta * continuityFactor, MIN_PROB);
+        double pTheta = Math.exp(-ANGLE_LAMBDA * (theta / 180.0));
+        double pairFactor = calculatePairLayerContinuityFactor(from, to, roadNetwork, false, "FIRST_ORDER");
+        return Math.max(pDistance * pTheta * pairFactor, MIN_PROB);
     }
 
     private double calculateSecondOrderObservationProbability(CandidatePoint prev,
@@ -914,23 +826,230 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
                                                              CandidatePoint p2,
                                                              double greatCircleTotal,
                                                              RoadNetwork roadNetwork) {
+
         double routeDistance = calculateRouteDistanceBetweenCandidates(p0, p1, roadNetwork)
                 + calculateRouteDistanceBetweenCandidates(p1, p2, roadNetwork);
         double kt = Math.abs(greatCircleTotal - routeDistance);
-        return Math.max(Math.exp(-kt / SECOND_ORDER_BETA_METERS), MIN_PROB);
+        double lambda = Math.max(SECOND_ORDER_BETA_METERS, 1.0);
+        double base = (1.0 / lambda) * Math.exp(-kt / lambda);
+        double layerFactor = calculateLayerContinuityFactor(p0, p1, p2, roadNetwork);
+        if (shouldLogLayerContinuityEvent(p0, p1, p2, layerFactor)) {
+//            System.out.println("[LAYER_CONTINUITY_ACTIVE] p0="
+//                    + describeRoadCandidate(p0)
+//                    + " p1=" + describeRoadCandidate(p1)
+//                    + " p2=" + describeRoadCandidate(p2)
+//                    + " factor=" + layerFactor);
+        }
+        return Math.max(base * layerFactor, MIN_PROB);
+
+    }
+
+    private double calculateLayerContinuityFactor(CandidatePoint p0,
+                                                  CandidatePoint p1,
+                                                  CandidatePoint p2,
+                                                  RoadNetwork roadNetwork) {
+        if (p0 == null || p1 == null || p2 == null) {
+            return 1.0;
+        }
+
+        boolean corridor01 = sameCorridorFamily(p0, p1);
+        boolean corridor12 = sameCorridorFamily(p1, p2);
+        boolean corridor02 = sameCorridorFamily(p0, p2);
+        boolean same01 = sameLayerBand(p0, p1);
+        boolean same12 = sameLayerBand(p1, p2);
+        boolean same02 = sameLayerBand(p0, p2);
+
+        if (!corridor01 && !corridor12) {
+            return 1.0;
+        }
+
+        double evidence12 = calculatePairLayerSwitchEvidence(p1, p2, roadNetwork);
+        double layerFactor = 1.0;
+        // A -> A -> B : 同走廊内待确认切层，进一步压住第一拍切层
+        if (corridor01 && corridor12 && same01 && !same12) {
+            layerFactor = clampTransitionFactor(Math.exp(-2.10 * (1.0 - evidence12)), 0.10, 1.0);
+        }
+
+        // A -> B -> A : 同走廊内单点回跳，进一步加强惩罚
+        if (corridor01 && corridor12 && corridor02 && !same01 && !same12 && same02) {
+            layerFactor = clampTransitionFactor(Math.exp(-3.20 * (1.0 - evidence12)), 0.03, 1.0);
+        }
+
+        // A -> B -> B : 切层后继续留在新层，增强保持奖励
+        if (corridor01 && corridor12 && !same01 && same12) {
+            layerFactor = clampTransitionFactor(1.0 + 0.75 * evidence12, 1.0, 1.75);
+        }
+        return layerFactor;
+    }
+    private String describeRoadCandidate(CandidatePoint c) {
+        if (c == null || c.getRoad() == null) {
+            return "<null>";
+        }
+        return String.format(Locale.ROOT,
+                "%s|%s|layer=%d|bridge=%s|dist=%.1f|theta=%.1f|obs=%.6f",
+                safeRoadName(c.getRoad()),
+                c.getRoad().getType(),
+                c.getRoad().getLayerLevel(),
+                c.getRoad().isBridge(),
+                c.getDistanceMeters(),
+                c.getThetaDegrees(),
+                c.getObservationProb());
+    }
+
+
+    private double calculatePairLayerContinuityFactor(CandidatePoint from,
+                                                      CandidatePoint to,
+                                                      RoadNetwork roadNetwork,
+                                                      boolean allowSameLayerReward,
+                                                      String stage) {
+        if (from == null || to == null || from.getRoad() == null || to.getRoad() == null) {
+            return 1.0;
+        }
+        if (!sameCorridorFamily(from, to)) {
+            return 1.0;
+        }
+
+        double evidence = calculatePairLayerSwitchEvidence(from, to, roadNetwork);
+        double factor;
+        if (!sameLayerBand(from, to)) {
+            factor = clampTransitionFactor(Math.exp(-2.05 * (1.0 - evidence)), 0.10, 1.0);
+        } else if (allowSameLayerReward) {
+            factor = clampTransitionFactor(1.0 + 0.18 * evidence, 1.0, 1.18);
+        } else {
+            factor = 1.0;
+        }
+
+        if (factor != 1.0) {
+//            System.out.println("[LAYER_PAIR_CONTINUITY][" + stage + "] from="
+//                    + describeRoadCandidate(from)
+//                    + " to=" + describeRoadCandidate(to)
+//                    + " factor=" + factor);
+        }
+        return factor;
+    }
+
+    private boolean shouldLogLayerContinuityEvent(CandidatePoint p0,
+                                                  CandidatePoint p1,
+                                                  CandidatePoint p2,
+                                                  double factor) {
+        if (Math.abs(factor - 1.0) > 1e-9) {
+            return true;
+        }
+        return !sameLayerBand(p0, p1)
+                || !sameLayerBand(p1, p2)
+                || !sameLayerBand(p0, p2);
+    }
+
+    private boolean sameCorridorFamily(CandidatePoint a, CandidatePoint b) {
+        if (a == null || b == null || a.getRoad() == null || b.getRoad() == null) {
+            return false;
+        }
+
+        double dirDiff = roadToRoadDirectionDifference(a, b);
+        if (dirDiff > 15.0) {
+            return false;
+        }
+
+        if (sameWay(a.getRoad(), b.getRoad())) {
+            return true;
+        }
+
+        String aName = normalizeRoadName(a.getRoad().getName());
+        String bName = normalizeRoadName(b.getRoad().getName());
+        if (!aName.isEmpty() && aName.equals(bName)) {
+            return true;
+        }
+
+        String aType = a.getRoad().getType();
+        String bType = b.getRoad().getType();
+        if (aType != null && aType.equals(bType)) {
+            double separation = estimateParallelRoadSeparation(a, b);
+            if (separation <= 35.0) {
+                return true;
+            }
+        }
+
+        return roadsShareNode(a.getRoad(), b.getRoad())
+                || areEdgesMutuallyConnected(a.getRoad(), b.getRoad());
+    }
+
+    private boolean sameLayerBand(CandidatePoint a, CandidatePoint b) {
+        return layerBand(a) == layerBand(b);
+    }
+
+    private int layerBand(CandidatePoint candidate) {
+        if (candidate == null || candidate.getRoad() == null) {
+            return 0;
+        }
+        RoadEdge road = candidate.getRoad();
+        return (road.getLayerLevel() > 0 || road.isBridge() || road.isTunnel()) ? 1 : 0;
+    }
+
+    private double calculatePairLayerSwitchEvidence(CandidatePoint from,
+                                                    CandidatePoint to,
+                                                    RoadNetwork roadNetwork) {
+        if (from == null || to == null || from.getRoad() == null || to.getRoad() == null) {
+            return 0.0;
+        }
+
+        double obsAbs = clamp01(to.getObservationProb());
+        double closeScore = clamp01((25.0 - Math.min(to.getDistanceMeters(), 25.0)) / 25.0);
+        double obsDelta = clamp01((to.getObservationProb() - from.getObservationProb() + 0.20) / 0.40);
+        double observationEvidence = clamp01(0.45 * obsAbs + 0.35 * closeScore + 0.20 * obsDelta);
+
+        double greatCircleDistance = calculateGreatCircleDistanceBetweenPoints(from.getTrackPoint(), to.getTrackPoint());
+        double routeDistance = calculateRouteDistanceBetweenCandidates(from, to, roadNetwork);
+        double dt = Math.abs(greatCircleDistance - routeDistance);
+        double routeEvidence = clamp01(1.0 - (dt / 40.0));
+
+        double connectionEvidence = 0.0;
+        if (areEdgesMutuallyConnected(from.getRoad(), to.getRoad()) || roadsShareNode(from.getRoad(), to.getRoad())) {
+            connectionEvidence = 1.0;
+        } else {
+            double endpointGap = estimateRoadEndpointGap(from.getRoad(), to.getRoad(), roadNetwork);
+            if (endpointGap <= 20.0) {
+                connectionEvidence = 0.85;
+            } else if (endpointGap <= 35.0) {
+                connectionEvidence = 0.60;
+            } else if (from.getRoad().isRampLike() || to.getRoad().isRampLike()) {
+                connectionEvidence = 0.65;
+            }
+        }
+
+        double evidence = clamp01(0.45 * observationEvidence + 0.35 * routeEvidence + 0.20 * connectionEvidence);
+
+        if (!hasStrongLayerAccessEvidence(from, to, roadNetwork)) {
+            evidence *= 0.75;
+        }
+        return clamp01(evidence);
+    }
+
+    private boolean hasStrongLayerAccessEvidence(CandidatePoint from,
+                                                 CandidatePoint to,
+                                                 RoadNetwork roadNetwork) {
+        if (from == null || to == null || from.getRoad() == null || to.getRoad() == null) {
+            return false;
+        }
+        if (from.getRoad().isRampLike() || to.getRoad().isRampLike()) {
+            return true;
+        }
+        if (areEdgesMutuallyConnected(from.getRoad(), to.getRoad()) || roadsShareNode(from.getRoad(), to.getRoad())) {
+            return true;
+        }
+        return estimateRoadEndpointGap(from.getRoad(), to.getRoad(), roadNetwork) <= 20.0;
+    }
+
+    private double clampTransitionFactor(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     private double adaptiveCombine(double observationProbability,
                                    double transitionProbability,
                                    double complexity) {
         double f = clamp01(complexity);
-        double left = (1.0 - f) * Math.max(observationProbability, MIN_PROB);
-        double right = f * Math.max(transitionProbability, MIN_PROB);
-        double denominator = left + right;
-        if (denominator <= 0.0) {
-            return MIN_PROB;
-        }
-        return Math.max((left * right) / denominator, MIN_PROB);
+        double obs = Math.max(observationProbability, MIN_PROB);
+        double trans = Math.max(transitionProbability, MIN_PROB);
+        return Math.max(Math.pow(obs, 1.0 - f) * Math.pow(trans, f), MIN_PROB);
     }
 
     private double calculateRouteDistanceBetweenCandidates(CandidatePoint from,
@@ -1501,65 +1620,120 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
     }
 
     private List<PointComplexity> calculateComplexities(List<TrackPoint> points, RoadNetwork roadNetwork) {
-        List<PointComplexity> result = new ArrayList<>(points.size());
+        List<List<RoadEdge>> nearbyRoads = new ArrayList<>(points.size());
+        List<Double> rawDirectionalVariances = new ArrayList<>(points.size());
+        List<Double> connectivityValues = new ArrayList<>(points.size());
+        List<Boolean> highDegreeFlags = new ArrayList<>(points.size());
+
         for (TrackPoint point : points) {
             double lat = bytesToDoubleSafe(point.getLatEnc());
             double lon = bytesToDoubleSafe(point.getLngEnc());
             List<RoadEdge> nearby = findNearbyEdgesCached(roadNetwork, lat, lon, COMPLEXITY_RADIUS_METERS);
-            double directional = calculateDirectionalComplexity(nearby);
-            double connectivity = calculateConnectivityComplexity(nearby);
-            double complexity = Math.max(directional, connectivity);
-            boolean isComplex = complexity >= OVERALL_COMPLEX_THRESHOLD
-                    || (directional >= DIRECTION_COMPLEX_THRESHOLD && connectivity >= 0.35)
-                    || containsHighDegreeNode(nearby, COMPLEX_NODE_DEGREE_THRESHOLD);
+            nearbyRoads.add(nearby);
+            rawDirectionalVariances.add(calculateDirectionalVariance(nearby));
+            connectivityValues.add(calculateConnectivityComplexity(nearby));
+            highDegreeFlags.add(containsHighDegreeNode(nearby, COMPLEX_NODE_DEGREE_THRESHOLD));
+        }
+
+        double meanVariance = 0.0;
+        for (double variance : rawDirectionalVariances) {
+            meanVariance += variance;
+        }
+        meanVariance /= Math.max(rawDirectionalVariances.size(), 1);
+
+        double varianceStd = 0.0;
+        for (double variance : rawDirectionalVariances) {
+            varianceStd += Math.pow(variance - meanVariance, 2.0);
+        }
+        varianceStd = Math.sqrt(varianceStd / Math.max(rawDirectionalVariances.size(), 1));
+
+        List<PointComplexity> result = new ArrayList<>(points.size());
+        for (int i = 0; i < points.size(); i++) {
+            double rawVariance = rawDirectionalVariances.get(i);
+            double directional = calculateDirectionalComplexity(rawVariance, meanVariance, varianceStd);
+            double connectivity = clamp01(connectivityValues.get(i));
+            double complexity = clamp01(Math.max(directional, connectivity));
+            boolean directionalComplex = rawVariance > 0.0 && rawVariance < 0.5;
+            boolean isComplex = directionalComplex || highDegreeFlags.get(i);
             result.add(new PointComplexity(directional, connectivity, complexity, isComplex));
         }
         return result;
     }
 
     private double calculateDirectionalComplexity(List<RoadEdge> roads) {
+        return calculateDirectionalComplexity(calculateDirectionalVariance(roads), 0.0, 0.0);
+    }
+
+    private double calculateDirectionalVariance(List<RoadEdge> roads) {
         if (roads == null || roads.size() < 2) {
-            return 0.0;
+            return Double.POSITIVE_INFINITY;
         }
 
         List<Double> directionDiffs = new ArrayList<>();
         for (int i = 0; i < roads.size(); i++) {
             for (int j = i + 1; j < roads.size(); j++) {
-                directionDiffs.add(calculateAngleDifference(safeDirection(roads.get(i)), safeDirection(roads.get(j))));
+                double diff = calculateAngleDifference(safeDirection(roads.get(i)), safeDirection(roads.get(j)));
+                diff = Math.min(diff, 180.0 - diff);
+                directionDiffs.add(Math.abs(diff));
             }
         }
 
         if (directionDiffs.isEmpty()) {
-            return 0.0;
+            return Double.POSITIVE_INFINITY;
         }
 
         double mean = 0.0;
-        for (Double diff : directionDiffs) {
+        for (double diff : directionDiffs) {
             mean += diff;
         }
         mean /= directionDiffs.size();
 
         double variance = 0.0;
-        for (Double diff : directionDiffs) {
-            variance += Math.pow(diff - mean, 2);
+        for (double diff : directionDiffs) {
+            variance += Math.pow(diff - mean, 2.0);
         }
-        variance /= directionDiffs.size();
+        return variance / directionDiffs.size();
+    }
 
-        double meanScore = clamp01(mean / 90.0);
-        double varianceScore = clamp01(Math.sqrt(variance) / 90.0);
-        return clamp01(0.75 * meanScore + 0.25 * varianceScore);
+    private double calculateDirectionalComplexity(double rawVariance, double meanVariance, double varianceStd) {
+        if (!Double.isFinite(rawVariance) || rawVariance == Double.POSITIVE_INFINITY) {
+            return 0.0;
+        }
+        if (varianceStd < 1e-9) {
+            return clamp01(1.0 - 0.5 * rawVariance);
+        }
+        double dz = Math.abs((rawVariance - meanVariance) / varianceStd);
+        return clamp01(1.0 - 0.5 * dz);
     }
 
     private double calculateConnectivityComplexity(List<RoadEdge> roads) {
         if (roads == null || roads.isEmpty()) {
             return 0.0;
         }
-        double degreeAvg = 0.0;
+
+        Set<Long> uniqueRoadIds = new HashSet<>();
+        Map<Long, Integer> nodeDegreeMap = new HashMap<>();
         for (RoadEdge road : roads) {
-            degreeAvg += safeNodeDegree(road);
+            if (road == null) {
+                continue;
+            }
+            if (road.getId() != null) {
+                uniqueRoadIds.add(normalizeRoadId(road));
+            }
+            nodeDegreeMap.merge(road.getStartNodeId(), 1, Integer::sum);
+            nodeDegreeMap.merge(road.getEndNodeId(), 1, Integer::sum);
         }
-        degreeAvg /= roads.size();
-        return clamp01((degreeAvg - 2.0) / 3.0);
+
+        int k = Math.max(uniqueRoadIds.size(), 1);
+        double mc = 0.0;
+        if (!nodeDegreeMap.isEmpty()) {
+            for (Integer degree : nodeDegreeMap.values()) {
+                mc += degree == null ? 0.0 : degree;
+            }
+            mc /= nodeDegreeMap.size();
+        }
+
+        return 0.5 * (1.0 + (mc / k));
     }
 
     private boolean containsHighDegreeNode(List<RoadEdge> roads, int threshold) {
@@ -1588,8 +1762,8 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
             if (!complexFlags[i]) {
                 continue;
             }
-            int from = Math.max(0, i - COMPLEX_CONTEXT_POINTS);
-            int to = Math.min(n - 1, i + COMPLEX_CONTEXT_POINTS);
+            int from = Math.max(0, i - 2);
+            int to = Math.min(n - 1, i + 2);
             for (int j = from; j <= to; j++) {
                 expanded[j] = true;
             }
@@ -1628,13 +1802,11 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
     }
 
     private double calculateLocalComplexity(List<Double> complexities, int centerIndex) {
-        int from = Math.max(0, centerIndex - 1);
-        int to = Math.min(complexities.size() - 1, centerIndex);
-        double sum = 0.0;
-        for (int i = from; i <= to; i++) {
-            sum += complexities.get(i);
+        if (complexities == null || complexities.isEmpty()) {
+            return 0.0;
         }
-        return clamp01(sum / Math.max(to - from + 1, 1));
+        int index = Math.max(0, Math.min(centerIndex, complexities.size() - 1));
+        return clamp01(complexities.get(index));
     }
 
     private List<CompressedWindow> compressStayWindows(List<TrackPoint> points) {
@@ -1725,13 +1897,13 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         if (dirDiff > 20.0) {
             return;
         }
-        System.out.println(String.format(Locale.ROOT,
-                "[MAP_MATCH_DECISION][CAND] ts=%d speed=%.2f structure=%s|%s|layer=%d|bridge=%s|dist=%.1f|theta=%.1f|obs=%.6f ground=%s|%s|layer=%d|bridge=%s|dist=%.1f|theta=%.1f|obs=%.6f dirDiff=%.1f",
-                point.getTs(),
-                point.getSpeedMps() == null ? -1.0 : point.getSpeedMps(),
-                safeRoadName(bestStructure.getRoad()), bestStructure.getRoad().getType(), bestStructure.getRoad().getLayerLevel(), bestStructure.getRoad().isBridge(), bestStructure.getDistanceMeters(), bestStructure.getThetaDegrees(), bestStructure.getObservationProb(),
-                safeRoadName(bestGround.getRoad()), bestGround.getRoad().getType(), bestGround.getRoad().getLayerLevel(), bestGround.getRoad().isBridge(), bestGround.getDistanceMeters(), bestGround.getThetaDegrees(), bestGround.getObservationProb(),
-                dirDiff));
+//        System.out.println(String.format(Locale.ROOT,
+//                "[MAP_MATCH_DECISION][CAND] ts=%d speed=%.2f structure=%s|%s|layer=%d|bridge=%s|dist=%.1f|theta=%.1f|obs=%.6f ground=%s|%s|layer=%d|bridge=%s|dist=%.1f|theta=%.1f|obs=%.6f dirDiff=%.1f",
+//                point.getTs(),
+//                point.getSpeedMps() == null ? -1.0 : point.getSpeedMps(),
+//                safeRoadName(bestStructure.getRoad()), bestStructure.getRoad().getType(), bestStructure.getRoad().getLayerLevel(), bestStructure.getRoad().isBridge(), bestStructure.getDistanceMeters(), bestStructure.getThetaDegrees(), bestStructure.getObservationProb(),
+//                safeRoadName(bestGround.getRoad()), bestGround.getRoad().getType(), bestGround.getRoad().getLayerLevel(), bestGround.getRoad().isBridge(), bestGround.getDistanceMeters(), bestGround.getThetaDegrees(), bestGround.getObservationProb(),
+//                dirDiff));
     }
 
     private void logSelectedDecision(TrackPoint point,
@@ -1788,15 +1960,15 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
                 continue;
             }
             double dirDiff = roadToRoadDirectionDifference(prev, curr);
-            System.out.println(String.format(Locale.ROOT,
-                    "[MAP_MATCH_DECISION][SWITCH] pos=%d->%d ts=%d->%d from=%s|%s|layer=%d|bridge=%s|dist=%.1f to=%s|%s|layer=%d|bridge=%s|dist=%.1f dirDiff=%.1f",
-                    startPositionOffset + i - 1,
-                    startPositionOffset + i,
-                    points.get(i - 1).getTs(),
-                    points.get(i).getTs(),
-                    safeRoadName(prev.getRoad()), prev.getRoad().getType(), prev.getRoad().getLayerLevel(), prev.getRoad().isBridge(), prev.getDistanceMeters(),
-                    safeRoadName(curr.getRoad()), curr.getRoad().getType(), curr.getRoad().getLayerLevel(), curr.getRoad().isBridge(), curr.getDistanceMeters(),
-                    dirDiff));
+//            System.out.println(String.format(Locale.ROOT,
+//                    "[MAP_MATCH_DECISION][SWITCH] pos=%d->%d ts=%d->%d from=%s|%s|layer=%d|bridge=%s|dist=%.1f to=%s|%s|layer=%d|bridge=%s|dist=%.1f dirDiff=%.1f",
+//                    startPositionOffset + i - 1,
+//                    startPositionOffset + i,
+//                    points.get(i - 1).getTs(),
+//                    points.get(i).getTs(),
+//                    safeRoadName(prev.getRoad()), prev.getRoad().getType(), prev.getRoad().getLayerLevel(), prev.getRoad().isBridge(), prev.getDistanceMeters(),
+//                    safeRoadName(curr.getRoad()), curr.getRoad().getType(), curr.getRoad().getLayerLevel(), curr.getRoad().isBridge(), curr.getDistanceMeters(),
+//                    dirDiff));
             logCandidateWindow(candidateLists, i - 1, startPositionOffset + i - 1);
             logCandidateWindow(candidateLists, i, startPositionOffset + i);
         }
@@ -2315,7 +2487,8 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         DrivingMatchQuality hmmQuality = evaluateDrivingMatchQuality(prepared, matchedResults, matchedPoints, reconstructedPoints);
         logDrivingMatchQuality("HMM", hmmQuality, prepared, matchedPoints, reconstructedPoints);
 
-        if (shouldFallbackDrivingResult(hmmQuality)) {
+        boolean disableFallbackForDebug = true; // 调试时先注释/关闭 fallback，直接看 HMM 处理效果
+        if (!disableFallbackForDebug && shouldFallbackDrivingResult(hmmQuality)) {
             System.out.println(String.format(
                     Locale.ROOT,
                     "[MAP_MATCH_FALLBACK] stage=HMM_REJECTED avgSnap=%.2f p90=%.2f badRatio=%.3f detourRatio=%.3f detourExtra=%.1f",
@@ -2358,7 +2531,8 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
 
         System.out.println(String.format(
                 Locale.ROOT,
-                "[MAP_MATCH_FALLBACK] final=HMM score=%.3f",
+                "[MAP_MATCH_FALLBACK] disabled=%s final=HMM score=%.3f",
+                disableFallbackForDebug,
                 hmmQuality.score()
         ));
         return new SegmentPolylineResult(segment.mode, matchedPoints, reconstructedPoints, false);
@@ -2376,20 +2550,20 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         double matchedDistance = calculateTotalDistance(matchedPoints);
         double reconstructedDistance = calculateTotalDistance(reconstructedPoints);
 
-        System.out.println(String.format(
-                Locale.ROOT,
-                "[MAP_MATCH_QUALITY] stage=%s avgSnap=%.2f p90=%.2f badRatio=%.3f detourRatio=%.3f detourExtra=%.1f rawDistance=%.1f matchedDistance=%.1f reconstructedDistance=%.1f score=%.3f",
-                stage,
-                quality.getAvgSnapMeters(),
-                quality.getP90SnapMeters(),
-                quality.getBadSnapRatio(),
-                quality.getDetourRatio(),
-                quality.getDetourExtraMeters(),
-                rawDistance,
-                matchedDistance,
-                reconstructedDistance,
-                quality.score()
-        ));
+//        System.out.println(String.format(
+//                Locale.ROOT,
+//                "[MAP_MATCH_QUALITY] stage=%s avgSnap=%.2f p90=%.2f badRatio=%.3f detourRatio=%.3f detourExtra=%.1f rawDistance=%.1f matchedDistance=%.1f reconstructedDistance=%.1f score=%.3f",
+//                stage,
+//                quality.getAvgSnapMeters(),
+//                quality.getP90SnapMeters(),
+//                quality.getBadSnapRatio(),
+//                quality.getDetourRatio(),
+//                quality.getDetourExtraMeters(),
+//                rawDistance,
+//                matchedDistance,
+//                reconstructedDistance,
+//                quality.score()
+//        ));
     }
 
     private DrivingMatchQuality evaluateDrivingMatchQuality(List<TrackPoint> prepared,
@@ -3141,6 +3315,7 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
                 0.1
         );
         result.setPosition(position);
+        logPointRoadMapping(point, result, null, position, "RAW_FALLBACK");
         return result;
     }
 
@@ -3155,7 +3330,57 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         result.setMatchedRoadName(candidate.getRoad().getName());
         result.setMatchedRoad(candidate.getRoad());
         result.setPosition(position);
+        logPointRoadMapping(point, result, candidate, position, "MATCHED");
         return result;
+    }
+
+    private void logPointRoadMapping(TrackPoint point,
+                                     MapMatchingResult result,
+                                     CandidatePoint candidate,
+                                     int position,
+                                     String stage) {
+        if (point == null || result == null) {
+            return;
+        }
+
+        double rawLat = bytesToDoubleSafe(point.getLatEnc());
+        double rawLon = bytesToDoubleSafe(point.getLngEnc());
+        double matchedLat = result.getMatchedLatitude() == null ? rawLat : result.getMatchedLatitude();
+        double matchedLon = result.getMatchedLongitude() == null ? rawLon : result.getMatchedLongitude();
+        double snapMeters = calculateGreatCircleDistance(rawLat, rawLon, matchedLat, matchedLon);
+
+        double[] rawDisplay = toDisplayCoord(rawLat, rawLon);
+        double[] matchedDisplay = toDisplayCoord(matchedLat, matchedLon);
+
+        String roadName = candidate == null || candidate.getRoad() == null ? "<raw>" : safeRoadName(candidate.getRoad());
+        String roadType = candidate == null || candidate.getRoad() == null ? "-" : String.valueOf(candidate.getRoad().getType());
+        int layer = candidate == null || candidate.getRoad() == null ? 0 : candidate.getRoad().getLayerLevel();
+        boolean bridge = candidate != null && candidate.getRoad() != null && candidate.getRoad().isBridge();
+        double theta = candidate == null ? -1.0 : candidate.getThetaDegrees();
+        double obs = candidate == null ? 0.0 : candidate.getObservationProb();
+
+        System.out.println(String.format(
+                Locale.ROOT,
+                "[MAP_MATCH_POINT] stage=%s pos=%d ts=%d rawWgs=(%.6f,%.6f) rawDisplay=(%.6f,%.6f) matchedWgs=(%.6f,%.6f) matchedDisplay=(%.6f,%.6f) snap=%.2fm road=%s|%s|layer=%d|bridge=%s theta=%.1f obs=%.6f",
+                stage,
+                position,
+                point.getTs(),
+                rawLat,
+                rawLon,
+                rawDisplay[0],
+                rawDisplay[1],
+                matchedLat,
+                matchedLon,
+                matchedDisplay[0],
+                matchedDisplay[1],
+                snapMeters,
+                roadName,
+                roadType,
+                layer,
+                bridge,
+                theta,
+                obs
+        ));
     }
 
     private List<GeoPointVO> convertTrackPointsToGeoPoints(List<TrackPoint> points) {
