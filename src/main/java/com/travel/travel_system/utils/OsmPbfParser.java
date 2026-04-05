@@ -48,7 +48,7 @@ public class OsmPbfParser {
     /**
      * seed node 只用于“命中相关 way”的第一轮粗筛，适当放大即可。
      */
-    private static final double NODE_BBOX_BUFFER_KM = 4.0;
+    private static final double NODE_BBOX_BUFFER_KM = 6.0;
 
     public static RoadNetwork parseFromResource(String resourcePath,
                                                 double centerLat,
@@ -272,6 +272,7 @@ public class OsmPbfParser {
                 highwayTypeCounts.computeIfAbsent(effectiveHighway, k -> new AtomicLong()).incrementAndGet();
 
                 boolean oneWay = isOneWay(tags);
+                boolean reverseOneWay = isReverseOneWay(tags);
                 int maxSpeed = parseMaxSpeed(tags.get("maxspeed"));
                 String name = tags.getOrDefault("name", "未命名道路");
                 int layerLevel = parseLayer(tags);
@@ -296,21 +297,26 @@ public class OsmPbfParser {
                         continue;
                     }
 
+                    long edgeStartNodeId = reverseOneWay ? endNodeId : startNodeId;
+                    long edgeEndNodeId = reverseOneWay ? startNodeId : endNodeId;
+                    NodeCoord edgeStart = reverseOneWay ? end : start;
+                    NodeCoord edgeEnd = reverseOneWay ? start : end;
+
                     RoadNode startNode = new RoadNode();
-                    startNode.setId(startNodeId);
-                    startNode.setLat(start.lat);
-                    startNode.setLon(start.lon);
+                    startNode.setId(edgeStartNodeId);
+                    startNode.setLat(edgeStart.lat);
+                    startNode.setLon(edgeStart.lon);
                     network.addNode(startNode);
 
                     RoadNode endNode = new RoadNode();
-                    endNode.setId(endNodeId);
-                    endNode.setLat(end.lat);
-                    endNode.setLon(end.lon);
+                    endNode.setId(edgeEndNodeId);
+                    endNode.setLat(edgeEnd.lat);
+                    endNode.setLon(edgeEnd.lon);
                     network.addNode(endNode);
 
-                    RoadEdge edge = new RoadEdge(edgeIdSeed.getAndIncrement(), start.lat, start.lon, end.lat, end.lon);
-                    edge.setStartNodeId(startNodeId);
-                    edge.setEndNodeId(endNodeId);
+                    RoadEdge edge = new RoadEdge(edgeIdSeed.getAndIncrement(), edgeStart.lat, edgeStart.lon, edgeEnd.lat, edgeEnd.lon);
+                    edge.setStartNodeId(edgeStartNodeId);
+                    edge.setEndNodeId(edgeEndNodeId);
                     edge.setSourceWayId(way.getId());
                     edge.setSegmentIndex(i);
                     edge.setName(name);
@@ -321,10 +327,9 @@ public class OsmPbfParser {
                     edge.setBridge(bridge);
                     edge.setTunnel(tunnel);
                     edge.setRampLike(rampLike);
-                    edge.setShapePoints(Arrays.asList(
-                            new GeoPoint(start.lat, start.lon),
-                            new GeoPoint(end.lat, end.lon)
-                    ));
+                    edge.setShapePoints(reverseOneWay
+                            ? Arrays.asList(new GeoPoint(end.lat, end.lon), new GeoPoint(start.lat, start.lon))
+                            : Arrays.asList(new GeoPoint(start.lat, start.lon), new GeoPoint(end.lat, end.lon)));
                     edge.refreshGeometry();
                     network.addEdge(edge);
                     keptSegments.incrementAndGet();
@@ -407,16 +412,39 @@ public class OsmPbfParser {
         if (!MOTOR_VEHICLE_HIGHWAY_TYPES.contains(effectiveHighway)) {
             return false;
         }
+        return !isMotorVehicleAccessDenied(tags);
+    }
 
-        String motorVehicle = tags.get("motor_vehicle");
-        if ("no".equalsIgnoreCase(motorVehicle)) {
+    private static boolean isMotorVehicleAccessDenied(Map<String, String> tags) {
+        if (isDenied(tags.get("motor_vehicle")) || isDenied(tags.get("motorcar")) || isDenied(tags.get("vehicle"))) {
+            return true;
+        }
+        String access = normalizeTagValue(tags.get("access"));
+        if (access == null) {
             return false;
         }
-        String access = tags.get("access");
-        if ("no".equalsIgnoreCase(access) && !"destination".equalsIgnoreCase(tags.get("service"))) {
+        if ("destination".equals(access) || "delivery".equals(access) || "customers".equals(access) || "permissive".equals(access)) {
             return false;
         }
-        return true;
+        return isDenied(access);
+    }
+
+    private static boolean isDenied(String value) {
+        String normalized = normalizeTagValue(value);
+        if (normalized == null) {
+            return false;
+        }
+        return "no".equals(normalized)
+                || "private".equals(normalized)
+                || "agricultural".equals(normalized)
+                || "forestry".equals(normalized);
+    }
+
+    private static String normalizeTagValue(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return value.trim().toLowerCase(Locale.ROOT);
     }
 
     private static String normalizeHighwayType(String highway, Map<String, String> tags) {
@@ -478,10 +506,18 @@ public class OsmPbfParser {
     }
 
     private static boolean isOneWay(Map<String, String> tags) {
-        String value = tags.get("oneway");
-        return "yes".equalsIgnoreCase(value)
+        String value = normalizeTagValue(tags.get("oneway"));
+        String junction = normalizeTagValue(tags.get("junction"));
+        return "yes".equals(value)
                 || "1".equals(value)
-                || "true".equalsIgnoreCase(value);
+                || "true".equals(value)
+                || "-1".equals(value)
+                || "roundabout".equals(junction);
+    }
+
+    private static boolean isReverseOneWay(Map<String, String> tags) {
+        String value = normalizeTagValue(tags.get("oneway"));
+        return "-1".equals(value);
     }
 
     private static int parseMaxSpeed(String maxspeed) {

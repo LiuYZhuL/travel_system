@@ -3,6 +3,7 @@ package com.travel.travel_system.dto;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
+import com.travel.travel_system.dto.Projection;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -242,15 +243,6 @@ public class RoadEdge extends RoadNetworkInfo {
                 + Math.cos(rLat1) * Math.cos(rLat2) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
         double c = 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa));
         return 6371000 * c;
-    }
-
-    @Data
-    public static class Projection {
-        private final double lat;
-        private final double lon;
-        private final double distanceMeters;
-        private final double offsetMeters;
-        private final double localDirectionDegrees;
     }
 
     @Data

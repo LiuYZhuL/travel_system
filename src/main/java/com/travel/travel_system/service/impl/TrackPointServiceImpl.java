@@ -15,17 +15,7 @@ import lombok.Data;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Random;
-import java.util.Set;
+import java.util.*;
 import java.util.function.Supplier;
 
 import com.travel.travel_system.dto.*;
@@ -36,6 +26,12 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
     /**
      * 已按当前项目 TrackPoint / TrackPointService / TrackPolylineVO 结构对齐。
      */
+    private static final boolean DEBUG_SINGLE_POINT_DECISIONS = false;
+    private static final boolean DEBUG_CANDIDATE_WINDOWS = false;
+    private static final boolean USE_PAPER_EQ15_ADAPTIVE_COMBINE = true;
+    private static final double SIMPLE_PROJECTION_DEFAULT_MAX_SNAP_METERS = 120.0;
+    private static final double SIMPLE_PROJECTION_HARD_SEARCH_RADIUS_METERS = 800.0;
+    private static final double ROUTE_DISTANCE_UNREACHABLE_THRESHOLD = 900_000.0;
 
     @Autowired
     private TrackPointRepository trackPointRepository;
@@ -155,7 +151,7 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
             }
             List<TrackPoint> normalized = normalizeTrackPointsToInternalWgs84(trackPoints);
             if (roadNetwork == null || roadNetwork.getEdgeCount() == 0) {
-                return simpleProjection(normalized);
+                return simpleProjection(normalized, roadNetwork);
             }
             return matchAdaptiveHmm(normalized, roadNetwork);
         });
@@ -172,7 +168,7 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
 
     private List<MapMatchingResult> matchAdaptiveHmm(List<TrackPoint> originalPoints, RoadNetwork roadNetwork) {
         if (originalPoints.size() == 1) {
-            return simpleProjection(originalPoints);
+            return simpleProjection(originalPoints, roadNetwork);
         }
 
         List<CompressedWindow> windows = compressStayWindows(originalPoints);
@@ -182,7 +178,7 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         }
 
         if (representativePoints.size() == 1) {
-            return expandWindowResults(windows, simpleProjection(representativePoints));
+            return expandWindowResults(windows, simpleProjection(representativePoints, roadNetwork));
         }
 
         List<PointComplexity> complexityList = calculateComplexities(representativePoints, roadNetwork);
@@ -256,36 +252,61 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
                                                            RoadNetwork roadNetwork,
                                                            int maxCandidates) {
         List<List<CandidatePoint>> result = new ArrayList<>(points.size());
-        for (TrackPoint point : points) {
-            result.add(buildCandidatesForPoint(point, roadNetwork, maxCandidates));
+        for (int i = 0; i < points.size(); i++) {
+            CandidateBuildOutcome outcome = buildCandidatesForPoint(points, i, roadNetwork, maxCandidates);
+            result.add(outcome.getCandidates());
         }
         return result;
     }
 
-    private List<CandidatePoint> buildCandidatesForPoint(TrackPoint point,
-                                                         RoadNetwork roadNetwork,
-                                                         int maxCandidates) {
+    private CandidateBuildOutcome buildCandidatesForPoint(List<TrackPoint> points,
+                                                          int index,
+                                                          RoadNetwork roadNetwork,
+                                                          int maxCandidates) {
+        TrackPoint point = points.get(index);
         double lat = bytesToDoubleSafe(point.getLatEnc());
         double lon = bytesToDoubleSafe(point.getLngEnc());
         Double heading = headingOf(point);
+        long localGapMillis = estimateLocalSamplingGapMillis(points, index);
         Map<Long, CandidatePoint> merged = new HashMap<>();
+        Double usedRadius = null;
+        boolean usedFallback = false;
 
-        for (double radius : CANDIDATE_SEARCH_RADII_METERS) {
+        for (double radius : buildAdaptiveSearchRadii(point, localGapMillis, false)) {
             List<RoadEdge> nearby = findNearbyEdgesCached(roadNetwork, lat, lon, radius);
             if (nearby.isEmpty()) {
                 continue;
             }
+            int before = merged.size();
             appendCandidatePoints(merged, point, nearby, lat, lon, heading, 1.0, false);
+            if (usedRadius == null && merged.size() > before) {
+                usedRadius = radius;
+            }
         }
 
         if (merged.isEmpty()) {
-            for (double radius : CANDIDATE_FALLBACK_RADII_METERS) {
+            usedFallback = true;
+            for (double radius : buildAdaptiveSearchRadii(point, localGapMillis, true)) {
                 List<RoadEdge> nearby = findNearbyEdgesCached(roadNetwork, lat, lon, radius);
                 if (nearby.isEmpty()) {
                     continue;
                 }
+                int before = merged.size();
                 appendCandidatePoints(merged, point, nearby, lat, lon, heading,
                         EXTENDED_RADIUS_OBSERVATION_PENALTY, true);
+                if (usedRadius == null && merged.size() > before) {
+                    usedRadius = radius;
+                }
+            }
+        }
+
+        if (merged.isEmpty()) {
+            CandidatePoint rescue = buildNearestEdgeRescueCandidate(point, roadNetwork,
+                    SIMPLE_PROJECTION_HARD_SEARCH_RADIUS_METERS, EXTENDED_RADIUS_OBSERVATION_PENALTY);
+            if (rescue != null) {
+                mergeCandidate(merged, rescue);
+                usedRadius = SIMPLE_PROJECTION_HARD_SEARCH_RADIUS_METERS;
+                usedFallback = true;
             }
         }
 
@@ -302,8 +323,96 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
             candidates = new ArrayList<>(candidates.subList(0, maxCandidates));
         }
         normalizeObservationProbabilities(candidates);
-        logCandidateCompetition(point, candidates);
-        return candidates;
+        return new CandidateBuildOutcome(candidates, usedRadius, usedFallback, localGapMillis);
+    }
+
+    private List<Double> buildAdaptiveSearchRadii(TrackPoint point, long localGapMillis, boolean fallback) {
+        TreeSet<Double> radii = new TreeSet<>();
+        double[] base = fallback ? CANDIDATE_FALLBACK_RADII_METERS : CANDIDATE_SEARCH_RADII_METERS;
+        for (double radius : base) {
+            radii.add(radius);
+        }
+
+        double adaptive = computeAdaptiveSearchRadiusMeters(point, localGapMillis, fallback);
+        radii.add(adaptive);
+        radii.add(Math.min(SIMPLE_PROJECTION_HARD_SEARCH_RADIUS_METERS,
+                fallback ? Math.max(500.0, adaptive * 1.5) : Math.max(120.0, adaptive * 1.2)));
+        if (fallback) {
+            radii.add(SIMPLE_PROJECTION_HARD_SEARCH_RADIUS_METERS);
+        }
+        return new ArrayList<>(radii);
+    }
+
+    private double computeAdaptiveSearchRadiusMeters(TrackPoint point,
+                                                     long localGapMillis,
+                                                     boolean fallback) {
+        double accuracy = point.getAccuracyM() == null ? 18.0 : Math.max(5.0, point.getAccuracyM());
+        double speed = point.getSpeedMps() == null ? 0.0 : Math.max(0.0, point.getSpeedMps());
+        double gapSeconds = Math.max(0.0, localGapMillis / 1000.0);
+
+        double adaptive = Math.max(45.0, accuracy * 3.0);
+        adaptive = Math.max(adaptive, 40.0 + speed * 8.0);
+        adaptive = Math.max(adaptive, 55.0 + Math.max(0.0, gapSeconds - 5.0) * 12.0);
+        if (fallback) {
+            adaptive = Math.max(adaptive, 160.0);
+            return Math.min(SIMPLE_PROJECTION_HARD_SEARCH_RADIUS_METERS, adaptive);
+        }
+        return Math.min(320.0, adaptive);
+    }
+
+    private long estimateLocalSamplingGapMillis(List<TrackPoint> points, int index) {
+        if (points == null || points.isEmpty() || index < 0 || index >= points.size()) {
+            return 0L;
+        }
+        Long currentTs = points.get(index).getTs();
+        if (currentTs == null) {
+            return 0L;
+        }
+        Long prevTs = index > 0 ? points.get(index - 1).getTs() : null;
+        Long nextTs = index + 1 < points.size() ? points.get(index + 1).getTs() : null;
+        long prevGap = prevTs == null ? Long.MAX_VALUE : Math.max(0L, currentTs - prevTs);
+        long nextGap = nextTs == null ? Long.MAX_VALUE : Math.max(0L, nextTs - currentTs);
+        long best = Math.min(prevGap, nextGap);
+        if (best == Long.MAX_VALUE) {
+            best = Math.max(prevGap == Long.MAX_VALUE ? 0L : prevGap,
+                    nextGap == Long.MAX_VALUE ? 0L : nextGap);
+        }
+        return best == Long.MAX_VALUE ? 0L : best;
+    }
+
+    private CandidatePoint buildNearestEdgeRescueCandidate(TrackPoint point,
+                                                           RoadNetwork roadNetwork,
+                                                           double radiusMeters,
+                                                           double observationPenalty) {
+        if (point == null || roadNetwork == null || roadNetwork.getEdgeCount() == 0) {
+            return null;
+        }
+        double lat = bytesToDoubleSafe(point.getLatEnc());
+        double lon = bytesToDoubleSafe(point.getLngEnc());
+        Double heading = headingOf(point);
+        List<RoadEdge> nearby = findNearbyEdgesCached(roadNetwork, lat, lon, radiusMeters);
+        if (nearby.isEmpty()) {
+            return null;
+        }
+
+        CandidatePoint best = null;
+        for (RoadEdge road : nearby) {
+            Projection projection = projectPointToRoad(lat, lon, road);
+            double localDirection = projection.getLocalDirectionDegrees();
+            double theta = heading == null ? -1.0 : directionDifferenceToRoad(heading, road, localDirection);
+            double observation = calculateObservationProbability(projection.getDistanceMeters(), theta, road) * observationPenalty;
+            CandidatePoint candidate = new CandidatePoint(point, road,
+                    projection.getLat(), projection.getLon(),
+                    projection.getDistanceMeters(), theta,
+                    observation, projection.getOffsetFromStartMeters(), localDirection);
+            if (best == null
+                    || candidate.getDistanceMeters() < best.getDistanceMeters()
+                    || (Math.abs(candidate.getDistanceMeters() - best.getDistanceMeters()) < 1e-9
+                    && candidate.getObservationProb() > best.getObservationProb())) {
+                best = candidate;
+            }
+        }
+        return best;
     }
 
     private void appendCandidatePoints(Map<Long, CandidatePoint> target,
@@ -334,7 +443,7 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         if (candidate == null || candidate.getRoad() == null) {
             return;
         }
-        long key = normalizeRoadId(candidate.getRoad());
+        long key = stableRoadId(candidate.getRoad());
         CandidatePoint existing = target.get(key);
         if (existing == null
                 || candidate.getObservationProb() > existing.getObservationProb()
@@ -493,7 +602,6 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
             }
         }
 
-        logLayerSwitches(points, candidateLists, selected, startPositionOffset);
         selected = smoothLayerFlips(candidateLists, selected);
         return buildResultsFromSelection(points, candidateLists, selected, startPositionOffset);
     }
@@ -602,7 +710,6 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
             }
         }
 
-        logLayerSwitches(segment.getPoints(), candidateLists, selected, segment.getStartWindowIndex());
         selected = smoothLayerFlips(candidateLists, selected);
         return buildResultsFromSelection(segment.getPoints(), candidateLists, selected, segment.getStartWindowIndex());
     }
@@ -706,7 +813,6 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
             if (candidate == null) {
                 result = buildRawFallbackResult(points.get(i), startPositionOffset + i);
             } else {
-                logSelectedDecision(points.get(i), candidateLists.get(i), candidate, startPositionOffset + i);
                 result = buildMatchResult(points.get(i), candidate, startPositionOffset + i);
             }
             results.add(result);
@@ -1043,13 +1149,28 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         return Math.max(min, Math.min(max, value));
     }
 
+    /**
+     * 对齐论文式(15)：将复杂度 F 作为观测项与转移项之间的自适应调节因子。
+     * 论文中的 F 取值区间理论上更接近 [0.5, 1]，这里对低值做下限保护。
+     */
     private double adaptiveCombine(double observationProbability,
                                    double transitionProbability,
                                    double complexity) {
-        double f = clamp01(complexity);
+        double f = Math.max(0.5, clamp01(complexity));
         double obs = Math.max(observationProbability, MIN_PROB);
         double trans = Math.max(transitionProbability, MIN_PROB);
-        return Math.max(Math.pow(obs, 1.0 - f) * Math.pow(trans, f), MIN_PROB);
+
+        if (!USE_PAPER_EQ15_ADAPTIVE_COMBINE) {
+            return Math.max(Math.pow(obs, 1.0 - f) * Math.pow(trans, f), MIN_PROB);
+        }
+
+        double weightedObs = (1.0 - f) * obs;
+        double weightedTrans = f * trans;
+        double denominator = weightedObs + weightedTrans;
+        if (denominator <= MIN_PROB) {
+            return MIN_PROB;
+        }
+        return Math.max((weightedObs * weightedTrans) / denominator, MIN_PROB);
     }
 
     private double calculateRouteDistanceBetweenCandidates(CandidatePoint from,
@@ -1101,25 +1222,28 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
     }
 
     private String buildRouteDistanceCacheKey(CandidatePoint from, CandidatePoint to) {
-        long fromRoadId = normalizeRoadId(from.getRoad());
-        long toRoadId = normalizeRoadId(to.getRoad());
+        long fromRoadId = stableRoadId(from.getRoad());
+        long toRoadId = stableRoadId(to.getRoad());
         long fromOffsetBucket = Math.round(from.getOffsetFromStartMeters() / OFFSET_CACHE_BUCKET_METERS);
         long toOffsetBucket = Math.round(to.getOffsetFromStartMeters() / OFFSET_CACHE_BUCKET_METERS);
         return fromRoadId + ":" + fromOffsetBucket + ":" + toRoadId + ":" + toOffsetBucket;
     }
 
-    private long normalizeRoadId(RoadEdge road) {
+    /**
+     * 现状.md 明确要求移除旧的 `% 1_000_000` 截断逻辑，避免不同道路被错误归并为同一路。
+     */
+    private long stableRoadId(RoadEdge road) {
         if (road == null || road.getId() == null) {
             return -1L;
         }
-        return road.getId() % 1_000_000L;
+        return road.getId();
     }
 
     private boolean sameRoad(RoadEdge a, RoadEdge b) {
         if (a == null || b == null || a.getId() == null || b.getId() == null) {
             return false;
         }
-        return normalizeRoadId(a) == normalizeRoadId(b);
+        return stableRoadId(a) == stableRoadId(b);
     }
 
     private boolean sameWay(RoadEdge a, RoadEdge b) {
@@ -1144,8 +1268,8 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
             return 0.0;
         }
         try {
-            RoadEdge.Projection p1 = from.getRoad().project(to.getProjectedLat(), to.getProjectedLon());
-            RoadEdge.Projection p2 = to.getRoad().project(from.getProjectedLat(), from.getProjectedLon());
+            Projection p1 = from.getRoad().project(to.getProjectedLat(), to.getProjectedLon());
+            Projection p2 = to.getRoad().project(from.getProjectedLat(), from.getProjectedLon());
             return Math.max(p1.getDistanceMeters(), p2.getDistanceMeters());
         } catch (Throwable ignore) {
             return calculateGreatCircleDistance(from.getProjectedLat(), from.getProjectedLon(), to.getProjectedLat(), to.getProjectedLon());
@@ -1265,8 +1389,8 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         if (fromRoad == null || toRoad == null) {
             return false;
         }
-        long fromId = normalizeRoadId(fromRoad);
-        long toId = normalizeRoadId(toRoad);
+        long fromId = stableRoadId(fromRoad);
+        long toId = stableRoadId(toRoad);
         return containsConnectedEdgeId(fromRoad.getConnectedEdgeIds(), toId)
                 || containsConnectedEdgeId(toRoad.getConnectedEdgeIds(), fromId);
     }
@@ -1276,7 +1400,7 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
             return false;
         }
         for (Long id : connectedEdgeIds) {
-            if (id != null && (id.longValue() % 1_000_000L) == roadId) {
+            if (id != null && id.longValue() == roadId) {
                 return true;
             }
         }
@@ -1718,7 +1842,7 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
                 continue;
             }
             if (road.getId() != null) {
-                uniqueRoadIds.add(normalizeRoadId(road));
+                uniqueRoadIds.add(stableRoadId(road));
             }
             nodeDegreeMap.merge(road.getStartNodeId(), 1, Integer::sum);
             nodeDegreeMap.merge(road.getEndNodeId(), 1, Integer::sum);
@@ -1870,147 +1994,6 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         return count == 0 ? 0.0 : sum / count;
     }
 
-    private void logCandidateCompetition(TrackPoint point, List<CandidatePoint> candidates) {
-        if (point == null || candidates == null || candidates.size() < 2) {
-            return;
-        }
-        CandidatePoint bestStructure = null;
-        CandidatePoint bestGround = null;
-        for (CandidatePoint candidate : candidates) {
-            if (candidate == null || candidate.getRoad() == null) {
-                continue;
-            }
-            if (isStructureRoad(candidate.getRoad())) {
-                if (bestStructure == null || candidate.getObservationProb() > bestStructure.getObservationProb()) {
-                    bestStructure = candidate;
-                }
-            } else {
-                if (bestGround == null || candidate.getObservationProb() > bestGround.getObservationProb()) {
-                    bestGround = candidate;
-                }
-            }
-        }
-        if (bestStructure == null || bestGround == null) {
-            return;
-        }
-        double dirDiff = roadToRoadDirectionDifference(bestStructure, bestGround);
-        if (dirDiff > 20.0) {
-            return;
-        }
-//        System.out.println(String.format(Locale.ROOT,
-//                "[MAP_MATCH_DECISION][CAND] ts=%d speed=%.2f structure=%s|%s|layer=%d|bridge=%s|dist=%.1f|theta=%.1f|obs=%.6f ground=%s|%s|layer=%d|bridge=%s|dist=%.1f|theta=%.1f|obs=%.6f dirDiff=%.1f",
-//                point.getTs(),
-//                point.getSpeedMps() == null ? -1.0 : point.getSpeedMps(),
-//                safeRoadName(bestStructure.getRoad()), bestStructure.getRoad().getType(), bestStructure.getRoad().getLayerLevel(), bestStructure.getRoad().isBridge(), bestStructure.getDistanceMeters(), bestStructure.getThetaDegrees(), bestStructure.getObservationProb(),
-//                safeRoadName(bestGround.getRoad()), bestGround.getRoad().getType(), bestGround.getRoad().getLayerLevel(), bestGround.getRoad().isBridge(), bestGround.getDistanceMeters(), bestGround.getThetaDegrees(), bestGround.getObservationProb(),
-//                dirDiff));
-    }
-
-    private void logSelectedDecision(TrackPoint point,
-                                     List<CandidatePoint> layer,
-                                     CandidatePoint selected,
-                                     int position) {
-        if (point == null || layer == null || selected == null || selected.getRoad() == null) {
-            return;
-        }
-        CandidatePoint bestStructure = null;
-        CandidatePoint bestGround = null;
-        for (CandidatePoint candidate : layer) {
-            if (candidate == null || candidate.getRoad() == null) {
-                continue;
-            }
-            if (isStructureRoad(candidate.getRoad())) {
-                if (bestStructure == null || candidate.getObservationProb() > bestStructure.getObservationProb()) {
-                    bestStructure = candidate;
-                }
-            } else {
-                if (bestGround == null || candidate.getObservationProb() > bestGround.getObservationProb()) {
-                    bestGround = candidate;
-                }
-            }
-        }
-        if (bestStructure == null || bestGround == null) {
-            return;
-        }
-        System.out.println(String.format(Locale.ROOT,
-                "[MAP_MATCH_DECISION][SEL] pos=%d ts=%d selected=%s|%s|layer=%d|bridge=%s|dist=%.1f|theta=%.1f|obs=%.6f bestStructure=%s|%s|layer=%d|bridge=%s|dist=%.1f|theta=%.1f|obs=%.6f bestGround=%s|%s|layer=%d|bridge=%s|dist=%.1f|theta=%.1f|obs=%.6f",
-                position,
-                point.getTs(),
-                safeRoadName(selected.getRoad()), selected.getRoad().getType(), selected.getRoad().getLayerLevel(), selected.getRoad().isBridge(), selected.getDistanceMeters(), selected.getThetaDegrees(), selected.getObservationProb(),
-                safeRoadName(bestStructure.getRoad()), bestStructure.getRoad().getType(), bestStructure.getRoad().getLayerLevel(), bestStructure.getRoad().isBridge(), bestStructure.getDistanceMeters(), bestStructure.getThetaDegrees(), bestStructure.getObservationProb(),
-                safeRoadName(bestGround.getRoad()), bestGround.getRoad().getType(), bestGround.getRoad().getLayerLevel(), bestGround.getRoad().isBridge(), bestGround.getDistanceMeters(), bestGround.getThetaDegrees(), bestGround.getObservationProb()));
-    }
-
-    private void logLayerSwitches(List<TrackPoint> points,
-                                  List<List<CandidatePoint>> candidateLists,
-                                  int[] selected,
-                                  int startPositionOffset) {
-        if (points == null || candidateLists == null || selected == null || selected.length < 2) {
-            return;
-        }
-        for (int i = 1; i < selected.length; i++) {
-            CandidatePoint prev = selectedCandidate(candidateLists, selected, i - 1);
-            CandidatePoint curr = selectedCandidate(candidateLists, selected, i);
-            if (prev == null || curr == null || prev.getRoad() == null || curr.getRoad() == null) {
-                continue;
-            }
-            boolean prevStructure = isStructureRoad(prev.getRoad());
-            boolean currStructure = isStructureRoad(curr.getRoad());
-            if (prevStructure == currStructure) {
-                continue;
-            }
-            double dirDiff = roadToRoadDirectionDifference(prev, curr);
-//            System.out.println(String.format(Locale.ROOT,
-//                    "[MAP_MATCH_DECISION][SWITCH] pos=%d->%d ts=%d->%d from=%s|%s|layer=%d|bridge=%s|dist=%.1f to=%s|%s|layer=%d|bridge=%s|dist=%.1f dirDiff=%.1f",
-//                    startPositionOffset + i - 1,
-//                    startPositionOffset + i,
-//                    points.get(i - 1).getTs(),
-//                    points.get(i).getTs(),
-//                    safeRoadName(prev.getRoad()), prev.getRoad().getType(), prev.getRoad().getLayerLevel(), prev.getRoad().isBridge(), prev.getDistanceMeters(),
-//                    safeRoadName(curr.getRoad()), curr.getRoad().getType(), curr.getRoad().getLayerLevel(), curr.getRoad().isBridge(), curr.getDistanceMeters(),
-//                    dirDiff));
-            logCandidateWindow(candidateLists, i - 1, startPositionOffset + i - 1);
-            logCandidateWindow(candidateLists, i, startPositionOffset + i);
-        }
-    }
-
-    private void logCandidateWindow(List<List<CandidatePoint>> candidateLists, int index, int position) {
-        if (candidateLists == null || index < 0 || index >= candidateLists.size()) {
-            return;
-        }
-        List<CandidatePoint> layer = candidateLists.get(index);
-        if (layer == null || layer.isEmpty()) {
-            return;
-        }
-        int limit = Math.min(4, layer.size());
-        for (int j = 0; j < limit; j++) {
-            CandidatePoint c = layer.get(j);
-            if (c == null || c.getRoad() == null) {
-                continue;
-            }
-            System.out.println(String.format(Locale.ROOT,
-                    "[MAP_MATCH_DECISION][LAYER] pos=%d cand=%d road=%s|%s|layer=%d|bridge=%s|dist=%.1f|theta=%.1f|obs=%.6f",
-                    position,
-                    j,
-                    safeRoadName(c.getRoad()), c.getRoad().getType(), c.getRoad().getLayerLevel(), c.getRoad().isBridge(), c.getDistanceMeters(), c.getThetaDegrees(), c.getObservationProb()));
-        }
-    }
-
-    private CandidatePoint selectedCandidate(List<List<CandidatePoint>> candidateLists, int[] selected, int index) {
-        if (candidateLists == null || selected == null || index < 0 || index >= selected.length || index >= candidateLists.size()) {
-            return null;
-        }
-        int selectedIndex = selected[index];
-        List<CandidatePoint> layer = candidateLists.get(index);
-        if (layer == null || selectedIndex < 0 || selectedIndex >= layer.size()) {
-            return null;
-        }
-        return layer.get(selectedIndex);
-    }
-
-    private boolean isStructureRoad(RoadEdge road) {
-        return road != null && (road.isBridge() || road.getLayerLevel() > 0 || road.isTunnel());
-    }
 
     private String safeRoadName(RoadEdge road) {
         if (road == null) {
@@ -2487,7 +2470,7 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         DrivingMatchQuality hmmQuality = evaluateDrivingMatchQuality(prepared, matchedResults, matchedPoints, reconstructedPoints);
         logDrivingMatchQuality("HMM", hmmQuality, prepared, matchedPoints, reconstructedPoints);
 
-        boolean disableFallbackForDebug = true; // 调试时先注释/关闭 fallback，直接看 HMM 处理效果
+        boolean disableFallbackForDebug = false; // 按现状.md启用真正的 nearest-edge projection 兜底基线
         if (!disableFallbackForDebug && shouldFallbackDrivingResult(hmmQuality)) {
             System.out.println(String.format(
                     Locale.ROOT,
@@ -2499,7 +2482,7 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
                     hmmQuality.getDetourExtraMeters()
             ));
 
-            List<MapMatchingResult> projectedResults = simpleProjection(prepared);
+            List<MapMatchingResult> projectedResults = simpleProjection(prepared, roadNetwork);
             List<GeoPointVO> projectedPoints = convertMatchedResultsToGeoPoints(projectedResults, prepared);
             if (projectedPoints.isEmpty()) {
                 projectedPoints = convertTrackPointsToGeoPoints(prepared);
@@ -2550,20 +2533,20 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         double matchedDistance = calculateTotalDistance(matchedPoints);
         double reconstructedDistance = calculateTotalDistance(reconstructedPoints);
 
-//        System.out.println(String.format(
-//                Locale.ROOT,
-//                "[MAP_MATCH_QUALITY] stage=%s avgSnap=%.2f p90=%.2f badRatio=%.3f detourRatio=%.3f detourExtra=%.1f rawDistance=%.1f matchedDistance=%.1f reconstructedDistance=%.1f score=%.3f",
-//                stage,
-//                quality.getAvgSnapMeters(),
-//                quality.getP90SnapMeters(),
-//                quality.getBadSnapRatio(),
-//                quality.getDetourRatio(),
-//                quality.getDetourExtraMeters(),
-//                rawDistance,
-//                matchedDistance,
-//                reconstructedDistance,
-//                quality.score()
-//        ));
+        System.out.println(String.format(
+                Locale.ROOT,
+                "[MAP_MATCH_QUALITY] stage=%s avgSnap=%.2f p90=%.2f badRatio=%.3f detourRatio=%.3f detourExtra=%.1f rawDistance=%.1f matchedDistance=%.1f reconstructedDistance=%.1f score=%.3f",
+                stage,
+                quality.getAvgSnapMeters(),
+                quality.getP90SnapMeters(),
+                quality.getBadSnapRatio(),
+                quality.getDetourRatio(),
+                quality.getDetourExtraMeters(),
+                rawDistance,
+                matchedDistance,
+                reconstructedDistance,
+                quality.score()
+        ));
     }
 
     private DrivingMatchQuality evaluateDrivingMatchQuality(List<TrackPoint> prepared,
@@ -3300,11 +3283,51 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
     }
 
     private List<MapMatchingResult> simpleProjection(List<TrackPoint> points) {
+        RoadNetwork roadNetwork = null;
+        try {
+            if (points != null && !points.isEmpty()) {
+                roadNetwork = loadRoadNetwork(points);
+            }
+        } catch (Exception ignore) {
+            roadNetwork = null;
+        }
+        return simpleProjection(points, roadNetwork);
+    }
+
+    private List<MapMatchingResult> simpleProjection(List<TrackPoint> points, RoadNetwork roadNetwork) {
+        if (points == null || points.isEmpty()) {
+            return new ArrayList<>();
+        }
         List<MapMatchingResult> result = new ArrayList<>(points.size());
+
+        RoadNetwork resolvedRoadNetwork = roadNetwork;
+        if (resolvedRoadNetwork == null || resolvedRoadNetwork.getEdgeCount() == 0) {
+            try {
+                resolvedRoadNetwork = loadRoadNetwork(points);
+            } catch (Exception ignore) {
+                resolvedRoadNetwork = null;
+            }
+        }
+
         for (int i = 0; i < points.size(); i++) {
-            result.add(buildRawFallbackResult(points.get(i), i));
+            TrackPoint point = points.get(i);
+            long localGapMillis = estimateLocalSamplingGapMillis(points, i);
+            double maxSnapMeters = computeSimpleProjectionMaxSnapMeters(point, localGapMillis);
+            CandidatePoint candidate = buildNearestEdgeRescueCandidate(point, resolvedRoadNetwork,
+                    Math.max(maxSnapMeters * 2.0, 220.0), 1.0);
+            if (candidate != null && candidate.getDistanceMeters() <= maxSnapMeters) {
+                result.add(buildMatchResult(point, candidate, i));
+            } else {
+                result.add(buildRawFallbackResult(point, i));
+            }
         }
         return result;
+    }
+
+    private double computeSimpleProjectionMaxSnapMeters(TrackPoint point, long localGapMillis) {
+        double adaptiveRadius = computeAdaptiveSearchRadiusMeters(point, localGapMillis, true);
+        double accuracy = point.getAccuracyM() == null ? SIMPLE_PROJECTION_DEFAULT_MAX_SNAP_METERS : point.getAccuracyM() * 3.5;
+        return Math.min(180.0, Math.max(SIMPLE_PROJECTION_DEFAULT_MAX_SNAP_METERS, Math.min(adaptiveRadius, accuracy)));
     }
 
     private MapMatchingResult buildRawFallbackResult(TrackPoint point, int position) {
@@ -3315,7 +3338,6 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
                 0.1
         );
         result.setPosition(position);
-        logPointRoadMapping(point, result, null, position, "RAW_FALLBACK");
         return result;
     }
 
@@ -3330,58 +3352,9 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         result.setMatchedRoadName(candidate.getRoad().getName());
         result.setMatchedRoad(candidate.getRoad());
         result.setPosition(position);
-        logPointRoadMapping(point, result, candidate, position, "MATCHED");
         return result;
     }
 
-    private void logPointRoadMapping(TrackPoint point,
-                                     MapMatchingResult result,
-                                     CandidatePoint candidate,
-                                     int position,
-                                     String stage) {
-        if (point == null || result == null) {
-            return;
-        }
-
-        double rawLat = bytesToDoubleSafe(point.getLatEnc());
-        double rawLon = bytesToDoubleSafe(point.getLngEnc());
-        double matchedLat = result.getMatchedLatitude() == null ? rawLat : result.getMatchedLatitude();
-        double matchedLon = result.getMatchedLongitude() == null ? rawLon : result.getMatchedLongitude();
-        double snapMeters = calculateGreatCircleDistance(rawLat, rawLon, matchedLat, matchedLon);
-
-        double[] rawDisplay = toDisplayCoord(rawLat, rawLon);
-        double[] matchedDisplay = toDisplayCoord(matchedLat, matchedLon);
-
-        String roadName = candidate == null || candidate.getRoad() == null ? "<raw>" : safeRoadName(candidate.getRoad());
-        String roadType = candidate == null || candidate.getRoad() == null ? "-" : String.valueOf(candidate.getRoad().getType());
-        int layer = candidate == null || candidate.getRoad() == null ? 0 : candidate.getRoad().getLayerLevel();
-        boolean bridge = candidate != null && candidate.getRoad() != null && candidate.getRoad().isBridge();
-        double theta = candidate == null ? -1.0 : candidate.getThetaDegrees();
-        double obs = candidate == null ? 0.0 : candidate.getObservationProb();
-
-        System.out.println(String.format(
-                Locale.ROOT,
-                "[MAP_MATCH_POINT] stage=%s pos=%d ts=%d rawWgs=(%.6f,%.6f) rawDisplay=(%.6f,%.6f) matchedWgs=(%.6f,%.6f) matchedDisplay=(%.6f,%.6f) snap=%.2fm road=%s|%s|layer=%d|bridge=%s theta=%.1f obs=%.6f",
-                stage,
-                position,
-                point.getTs(),
-                rawLat,
-                rawLon,
-                rawDisplay[0],
-                rawDisplay[1],
-                matchedLat,
-                matchedLon,
-                matchedDisplay[0],
-                matchedDisplay[1],
-                snapMeters,
-                roadName,
-                roadType,
-                layer,
-                bridge,
-                theta,
-                obs
-        ));
-    }
 
     private List<GeoPointVO> convertTrackPointsToGeoPoints(List<TrackPoint> points) {
         List<GeoPointVO> geoPoints = new ArrayList<>(points.size());
@@ -3532,12 +3505,12 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
 
     private Projection projectPointToRoad(double lat, double lon, RoadEdge road) {
         try {
-            RoadEdge.Projection projection = road.project(lat, lon);
+            Projection projection = road.project(lat, lon);
             return new Projection(
                     projection.getLat(),
                     projection.getLon(),
                     projection.getDistanceMeters(),
-                    projection.getOffsetMeters(),
+                    projection.getOffsetFromStartMeters(),
                     projection.getLocalDirectionDegrees()
             );
         } catch (Throwable ignore) {
@@ -3744,6 +3717,15 @@ public class TrackPointServiceImpl implements TrackPointService, TrackMatchingCo
         private double offRoadRatio;
         private double avgSpeed;
         private double maxSpeed;
+    }
+
+    @Data
+    @AllArgsConstructor
+    private static class CandidateBuildOutcome {
+        private List<CandidatePoint> candidates;
+        private Double usedRadius;
+        private boolean usedFallback;
+        private long localGapMillis;
     }
 
     @Data

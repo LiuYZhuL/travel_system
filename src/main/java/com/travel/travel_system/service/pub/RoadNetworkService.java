@@ -112,48 +112,38 @@ public class RoadNetworkService {
     }
 
     public RoadNetwork getRoadNetwork(double lat, double lon, double radiusKm) {
-
         System.out.println("RoadNetworkService.getRoadNetwork lat=" + lat + ", lon=" + lon + ", radiusKm=" + radiusKm);
         System.out.println("[ROAD_NETWORK_LOAD] request center=(" + lat + "," + lon + ") radiusKm=" + radiusKm);
-        return loadFromPbf(lat, lon, radiusKm);
 
+        String cacheKey = buildCacheKey(lat, lon, radiusKm);
+        RoadNetwork memoryHit = getFromMemory(cacheKey);
+        if (memoryHit != null) {
+            System.out.println("[ROAD_NETWORK_LOAD] cache=memory key=" + cacheKey + " nodes="
+                    + memoryHit.getNodeCount() + ", edges=" + memoryHit.getEdgeCount());
+            logRoadNetworkHealth("MEMORY_HIT", memoryHit, radiusKm);
+            return memoryHit;
+        }
 
-//        String cacheKey = buildCacheKey(lat, lon, radiusKm);
-//
-//        RoadNetwork memoryHit = getFromMemory(cacheKey);
-//        if (memoryHit != null) {
-//            return memoryHit;
-//        }
-//
-//        Object lock = loadingLocks.computeIfAbsent(cacheKey, k -> new Object());
-//        synchronized (lock) {
-//            try {
-//                // 双重检查，避免并发情况下重复加载
-//                memoryHit = getFromMemory(cacheKey);
-//                if (memoryHit != null) {
-//                    return memoryHit;
-//                }
-//
-//                if (RoadNetworkSerializer.cacheExists(lat, lon, radiusKm)) {
-//                    RoadNetwork cached = RoadNetworkSerializer.loadFromCache(lat, lon, radiusKm);
-//                    System.out.println("after cache load: nodes=" + cached.getNodeCount()
-//                            + ", edges=" + cached.getEdgeCount());
-//                    if (cached != null) {
-//                        putIntoMemory(cacheKey, cached);
-//                        return cached;
-//                    }
-//                }
-//
-//                RoadNetwork roadNetwork = loadFromPbf(lat, lon, radiusKm);
-//                if (roadNetwork != null) {
-//                    RoadNetworkSerializer.saveToCache(roadNetwork, lat, lon, radiusKm);
-//                    putIntoMemory(cacheKey, roadNetwork);
-//                }
-//                return roadNetwork;
-//            } finally {
-//                loadingLocks.remove(cacheKey, lock);
-//            }
-//        }
+        Object lock = loadingLocks.computeIfAbsent(cacheKey, k -> new Object());
+        synchronized (lock) {
+            try {
+                memoryHit = getFromMemory(cacheKey);
+                if (memoryHit != null) {
+                    System.out.println("[ROAD_NETWORK_LOAD] cache=memory_after_lock key=" + cacheKey + " nodes="
+                            + memoryHit.getNodeCount() + ", edges=" + memoryHit.getEdgeCount());
+                    logRoadNetworkHealth("MEMORY_HIT_AFTER_LOCK", memoryHit, radiusKm);
+                    return memoryHit;
+                }
+
+                RoadNetwork roadNetwork = loadFromPbf(lat, lon, radiusKm);
+                if (roadNetwork != null) {
+                    putIntoMemory(cacheKey, roadNetwork);
+                }
+                return roadNetwork;
+            } finally {
+                loadingLocks.remove(cacheKey, lock);
+            }
+        }
     }
 
     /**
@@ -226,6 +216,7 @@ public class RoadNetworkService {
         if (roadNetwork != null) {
             System.out.println("最终路网: nodes=" + roadNetwork.getNodeCount() + ", edges=" + roadNetwork.getEdgeCount());
             System.out.println("[ROAD_NETWORK_LOAD] final nodes=" + roadNetwork.getNodeCount() + ", edges=" + roadNetwork.getEdgeCount() + ", sparse=" + isSparseUrbanNetwork(roadNetwork, radiusKm));
+            logRoadNetworkHealth("FINAL", roadNetwork, radiusKm);
         }
         return roadNetwork;
     }
@@ -239,6 +230,19 @@ public class RoadNetworkService {
         }
         return roadNetwork.getEdgeCount() < URBAN_SPARSE_EDGE_THRESHOLD
                 || roadNetwork.getNodeCount() < URBAN_SPARSE_NODE_THRESHOLD;
+    }
+
+
+    private void logRoadNetworkHealth(String stage, RoadNetwork roadNetwork, double radiusKm) {
+        if (roadNetwork == null) {
+            return;
+        }
+        System.out.println("[ROAD_NETWORK_HEALTH] stage=" + stage
+                + " radiusKm=" + radiusKm
+                + " nodes=" + roadNetwork.getNodeCount()
+                + " edges=" + roadNetwork.getEdgeCount()
+                + " components=" + roadNetwork.countWeaklyConnectedComponents()
+                + " largestWeakComponentRatio=" + roadNetwork.getLargestWeaklyConnectedComponentRatio());
     }
 
     private RoadNetwork getFromMemory(String cacheKey) {

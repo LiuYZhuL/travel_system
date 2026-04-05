@@ -242,37 +242,6 @@ public class RoadNetwork implements Serializable {
         return new ArrayList<>();
     }
 
-    public List<GeoPoint> getPathPoints(List<RoadEdge> edgePath) {
-        List<GeoPoint> points = new ArrayList<>();
-        if (edgePath == null || edgePath.isEmpty()) {
-            return points;
-        }
-        for (int i = 0; i < edgePath.size(); i++) {
-            List<GeoPoint> shape = edgePath.get(i).getShapePoints();
-            if (shape.isEmpty()) {
-                continue;
-            }
-            int from = i == 0 ? 0 : 1;
-            for (int j = from; j < shape.size(); j++) {
-                points.add(shape.get(j));
-            }
-        }
-        return points;
-    }
-
-    public List<GeoPoint> interpolateAlongEdge(RoadEdge edge, double startLat, double startLon, double endLat, double endLon, int steps) {
-        if (edge == null) {
-            List<GeoPoint> direct = new ArrayList<>();
-            for (int i = 0; i <= steps; i++) {
-                double t = steps <= 0 ? 0.0 : (double) i / steps;
-                direct.add(new GeoPoint(startLat + (endLat - startLat) * t, startLon + (endLon - startLon) * t));
-            }
-            return direct;
-        }
-        RoadEdge.Projection start = edge.project(startLat, startLon);
-        RoadEdge.Projection end = edge.project(endLat, endLon);
-        return edge.sliceByOffset(start.getOffsetMeters(), end.getOffsetMeters());
-    }
 
     public RoadNode getNode(long nodeId) { return nodes.get(nodeId); }
     public RoadEdge getEdge(long edgeId) { return edges.get(edgeId); }
@@ -292,8 +261,74 @@ public class RoadNetwork implements Serializable {
                 nodeAdjacencyList.computeIfAbsent(edge.getEndNodeId(), k -> new ArrayList<>());
             }
         }
+        rebuildConnectedEdgeIds();
         clearRuntimeCaches();
         System.out.println("邻接表重建完成: " + nodeAdjacencyList.size() + " 个节点有邻接边");
+    }
+
+    private void rebuildConnectedEdgeIds() {
+        Map<Long, Set<Long>> nodeToForwardEdgeIds = new HashMap<>();
+        for (RoadEdge edge : edgeList) {
+            nodeToForwardEdgeIds.computeIfAbsent(edge.getStartNodeId(), k -> new LinkedHashSet<>()).add(edge.getId());
+            nodeToForwardEdgeIds.computeIfAbsent(edge.getEndNodeId(), k -> new LinkedHashSet<>()).add(edge.getId());
+        }
+        for (RoadEdge edge : edgeList) {
+            LinkedHashSet<Long> connected = new LinkedHashSet<>();
+            connected.addAll(nodeToForwardEdgeIds.getOrDefault(edge.getStartNodeId(), Collections.emptySet()));
+            connected.addAll(nodeToForwardEdgeIds.getOrDefault(edge.getEndNodeId(), Collections.emptySet()));
+            connected.remove(edge.getId());
+            edge.setConnectedEdgeIds(connected);
+        }
+    }
+
+    public int countWeaklyConnectedComponents() {
+        return computeWeakConnectivityStats().componentCount;
+    }
+
+    public double getLargestWeaklyConnectedComponentRatio() {
+        WeakConnectivityStats stats = computeWeakConnectivityStats();
+        if (stats.totalNodes <= 0) {
+            return 1.0;
+        }
+        return stats.largestComponentSize / (double) stats.totalNodes;
+    }
+
+    private WeakConnectivityStats computeWeakConnectivityStats() {
+        if (nodes.isEmpty()) {
+            return new WeakConnectivityStats(0, 0, 0);
+        }
+        Map<Long, Set<Long>> undirected = new HashMap<>();
+        for (Long nodeId : nodes.keySet()) {
+            undirected.put(nodeId, new LinkedHashSet<>());
+        }
+        for (RoadEdge edge : edgeList) {
+            undirected.computeIfAbsent(edge.getStartNodeId(), k -> new LinkedHashSet<>()).add(edge.getEndNodeId());
+            undirected.computeIfAbsent(edge.getEndNodeId(), k -> new LinkedHashSet<>()).add(edge.getStartNodeId());
+        }
+
+        int componentCount = 0;
+        int largestComponentSize = 0;
+        Set<Long> visited = new HashSet<>();
+        for (Long nodeId : undirected.keySet()) {
+            if (!visited.add(nodeId)) {
+                continue;
+            }
+            componentCount++;
+            int size = 0;
+            ArrayDeque<Long> queue = new ArrayDeque<>();
+            queue.add(nodeId);
+            while (!queue.isEmpty()) {
+                Long current = queue.poll();
+                size++;
+                for (Long next : undirected.getOrDefault(current, Collections.emptySet())) {
+                    if (visited.add(next)) {
+                        queue.add(next);
+                    }
+                }
+            }
+            largestComponentSize = Math.max(largestComponentSize, size);
+        }
+        return new WeakConnectivityStats(componentCount, largestComponentSize, undirected.size());
     }
 
     public List<RoadEdge> findNearbyEdges(double lat, double lon, double radius) {
@@ -457,6 +492,17 @@ public class RoadNetwork implements Serializable {
         return 6371000 * c;
     }
 
+
+    private static class WeakConnectivityStats {
+        private final int componentCount;
+        private final int largestComponentSize;
+        private final int totalNodes;
+        private WeakConnectivityStats(int componentCount, int largestComponentSize, int totalNodes) {
+            this.componentCount = componentCount;
+            this.largestComponentSize = largestComponentSize;
+            this.totalNodes = totalNodes;
+        }
+    }
 
     private static class NodeDistance {
         private final long nodeId;
