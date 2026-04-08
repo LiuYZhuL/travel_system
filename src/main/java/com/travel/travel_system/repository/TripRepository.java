@@ -1,6 +1,7 @@
 package com.travel.travel_system.repository;
 
 import com.travel.travel_system.model.Trip;
+import com.travel.travel_system.model.enums.PrivacyMode;
 import com.travel.travel_system.model.enums.TripStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -46,9 +47,9 @@ public interface TripRepository extends JpaRepository<Trip, Long>, JpaSpecificat
      */
     @Query("SELECT t FROM Trip t WHERE t.userId = :userId AND t.title LIKE %:keyword%")
     Page<Trip> findByUserIdAndTitleContaining(
-        @Param("userId") Long userId,
-        @Param("keyword") String keyword,
-        Pageable pageable
+            @Param("userId") Long userId,
+            @Param("keyword") String keyword,
+            Pageable pageable
     );
 
     /**
@@ -56,16 +57,16 @@ public interface TripRepository extends JpaRepository<Trip, Long>, JpaSpecificat
      */
     @Query("SELECT t FROM Trip t WHERE t.userId = :userId AND t.startTime BETWEEN :startTime AND :endTime")
     Page<Trip> findByUserIdAndStartTimeBetween(
-        @Param("userId") Long userId,
-        @Param("startTime") Date startTime,
-        @Param("endTime") Date endTime,
-        Pageable pageable
+            @Param("userId") Long userId,
+            @Param("startTime") Date startTime,
+            @Param("endTime") Date endTime,
+            Pageable pageable
     );
 
     /**
      * 根据隐私模式查询行程
      */
-    List<Trip> findByUserIdAndPrivacyMode(Long userId, String privacyMode);
+    List<Trip> findByUserIdAndPrivacyMode(Long userId, PrivacyMode privacyMode);
 
     /**
      * 统计用户行程数量

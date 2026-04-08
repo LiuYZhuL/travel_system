@@ -1,23 +1,22 @@
 package com.travel.travel_system.controller;
 
+import com.travel.travel_system.utils.ApiResponse;
 import org.springframework.web.bind.annotation.*;
-
-import java.util.Map;
 
 @RestController
 @RequestMapping("/api/report")
-public class ReportController {
+public class ReportController extends BaseController {
 
     /**
      * 获取年度足迹报告
      */
     @GetMapping("/yearly/{year}")
-    public Map<String, Object> getYearlyReport(@PathVariable Integer year) {
-        return null;
+    public ApiResponse<?> getYearlyReport(@PathVariable Integer year) {
+        return error("SYSTEM_501", "获取年度足迹报告接口暂未实现");
     }
 
     @GetMapping("/monthly/{year}/{month}")
-    public Map<String, Object> getMonthlyReport(@PathVariable Integer year, @PathVariable Integer month) {
-        return null;
+    public ApiResponse<?> getMonthlyReport(@PathVariable Integer year, @PathVariable Integer month) {
+        return error("SYSTEM_501", "获取月度足迹报告接口暂未实现");
     }
 }

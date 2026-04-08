@@ -10,4 +10,5 @@ public interface TripRouteSnapshotService {
     Optional<TripRouteSnapshot> getSnapshotMeta(Long tripId);
     Optional<TripRouteSnapshotPayload> loadSnapshotPayload(Long tripId);
     Optional<TripRouteSnapshotPayload> loadSnapshotPayloadAndWarmRedis(Long tripId);
+    TripRouteSnapshot saveLatestSnapshot(Long tripId);
 }

@@ -3,36 +3,44 @@ package com.travel.travel_system.service.impl;
 import com.travel.travel_system.model.Anchor;
 import com.travel.travel_system.model.Photo;
 import com.travel.travel_system.model.Trip;
-import com.travel.travel_system.model.enums.MatchMethod;
 import com.travel.travel_system.model.enums.PrivacyMode;
 import com.travel.travel_system.repository.AnchorRepository;
 import com.travel.travel_system.repository.PhotoRepository;
 import com.travel.travel_system.repository.TripRepository;
+import com.travel.travel_system.service.MediaAnchorProjectionService;
 import com.travel.travel_system.service.PhotoService;
 import com.travel.travel_system.service.pub.OssService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.drew.imaging.ImageMetadataReader;
+import com.drew.imaging.ImageProcessingException;
+import com.drew.lang.GeoLocation;
+import com.drew.metadata.Metadata;
+import com.drew.metadata.exif.ExifIFD0Directory;
+import com.drew.metadata.exif.ExifSubIFDDirectory;
+import com.drew.metadata.exif.GpsDirectory;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 
 import java.util.Base64;
 import java.util.Date;
 import java.util.List;
-import java.util.Optional;
 
 @Service
 public class PhotoServiceImpl implements PhotoService {
 
     @Autowired
     private PhotoRepository photoRepository;
-
     @Autowired
     private TripRepository tripRepository;
-
     @Autowired
     private AnchorRepository anchorRepository;
-
     @Autowired
     private OssService ossService;
+    @Autowired
+    private MediaAnchorProjectionService mediaAnchorProjectionService;
 
     @Override
     @Transactional
@@ -49,23 +57,36 @@ public class PhotoServiceImpl implements PhotoService {
         photo.setTripId(tripId);
         photo.setObjectKey(url);
         photo.setFileHash(calculateHash(fileBytes));
-        photo.setShotTimeExif(new Date());
         photo.setCreatedAt(new Date());
         photo.setPrivacyMode(PrivacyMode.PUBLIC);
         photo.setIsCover(false);
+        photo.setBindingStatus("PENDING");
+
+        PhotoExifMeta exif = readPhotoExif(fileBytes);
+        if (exif != null) {
+            photo.setShotTimeExif(exif.shotTime);
+            if (exif.lat != null && exif.lng != null) {
+                photo.setLatEnc(TrackPointServiceImpl.encodeDoubleStatic(exif.lat));
+                photo.setLngEnc(TrackPointServiceImpl.encodeDoubleStatic(exif.lng));
+                photo.setCaptureCoordSource("EXIF");
+                photo.setCaptureCoordType("WGS84");
+            } else {
+                photo.setCaptureCoordSource("NONE");
+                photo.setCaptureCoordType(null);
+            }
+            photo.setCaptureTimeSource(exif.shotTime != null ? "EXIF" : "NONE");
+        } else {
+            // P0 修复：不要再用上传时间冒充拍摄时间
+            photo.setShotTimeExif(null);
+            photo.setCaptureTimeSource("NONE");
+            photo.setCaptureCoordSource("NONE");
+            photo.setCaptureCoordType(null);
+        }
 
         Photo savedPhoto = photoRepository.save(photo);
 
-        Anchor anchor = new Anchor();
-        anchor.setUserId(trip.getUserId());
-        anchor.setTripId(tripId);
-        anchor.setPhotoId(savedPhoto.getId());
-        anchor.setMatchedTs(System.currentTimeMillis());
-        anchor.setMatchMethod(MatchMethod.EXIF_DIRECT);
-        anchor.setConfidence(1.0f);
-        anchor.setManualOverride(false);
-        anchor.setCreatedAt(new Date());
-        anchorRepository.save(anchor);
+        // 统一走投影服务，不再在这里手工创建占位 Anchor
+        mediaAnchorProjectionService.projectPhotoAnchor(savedPhoto.getId(), tripId);
 
         return savedPhoto;
     }
@@ -96,7 +117,13 @@ public class PhotoServiceImpl implements PhotoService {
             }
         }
 
-        return photoRepository.save(photo);
+        Photo saved = photoRepository.save(photo);
+
+        // 如果你后面扩展了“手动填写时间/手动打点”，在保存 override 字段后
+        // 再调用一次：
+        // mediaAnchorProjectionService.projectPhotoAnchor(saved.getId(), saved.getTripId());
+
+        return saved;
     }
 
     @Override
@@ -121,6 +148,94 @@ public class PhotoServiceImpl implements PhotoService {
         photoRepository.delete(photo);
     }
 
+    @Override
+    @Transactional
+    public Photo updatePhotoAssistInfo(Long photoId, Long captureTsOverride, Double manualLat, Double manualLng, String coordType) {
+        Photo photo = photoRepository.findById(photoId)
+                .orElseThrow(() -> new RuntimeException("照片不存在，photoId: " + photoId));
+
+        photo.setCaptureTsOverride(captureTsOverride);
+
+        if (manualLat != null && manualLng != null) {
+            photo.setCaptureLatOverride(TrackPointServiceImpl.encodeDoubleStatic(manualLat));
+            photo.setCaptureLngOverride(TrackPointServiceImpl.encodeDoubleStatic(manualLng));
+            photo.setCaptureCoordSource("MANUAL");
+            photo.setCaptureCoordType(coordType != null && !coordType.isBlank() ? coordType.toUpperCase() : "GCJ02");
+        } else {
+            photo.setCaptureLatOverride(null);
+            photo.setCaptureLngOverride(null);
+            if (captureTsOverride != null) {
+                photo.setCaptureCoordSource("NONE");
+                photo.setCaptureCoordType(null);
+            }
+        }
+
+        if (captureTsOverride != null) {
+            photo.setCaptureTimeSource("USER_INPUT");
+        }
+
+        Photo saved = photoRepository.save(photo);
+
+        // 用户补时间 / 手动打点后，立即重投影
+        mediaAnchorProjectionService.projectPhotoAnchor(saved.getId(), saved.getTripId());
+        return saved;
+    }
+
+    private PhotoExifMeta readPhotoExif(byte[] fileBytes) {
+        if (fileBytes == null || fileBytes.length == 0) {
+            return null;
+        }
+
+        try (ByteArrayInputStream inputStream = new ByteArrayInputStream(fileBytes)) {
+            Metadata metadata = ImageMetadataReader.readMetadata(inputStream);
+
+            PhotoExifMeta meta = new PhotoExifMeta();
+
+            ExifSubIFDDirectory subIfd = metadata.getFirstDirectoryOfType(ExifSubIFDDirectory.class);
+            ExifIFD0Directory ifd0 = metadata.getFirstDirectoryOfType(ExifIFD0Directory.class);
+            GpsDirectory gpsDirectory = metadata.getFirstDirectoryOfType(GpsDirectory.class);
+
+            // 1. 时间：优先 DateTimeOriginal，其次 DateDigitized，再其次 IFD0 DateTime
+            if (subIfd != null) {
+                Date original = subIfd.getDateOriginal();
+                if (original != null) {
+                    meta.shotTime = original;
+                } else {
+                    Date digitized = subIfd.getDateDigitized();
+                    if (digitized != null) {
+                        meta.shotTime = digitized;
+                    }
+                }
+            }
+            if (meta.shotTime == null && ifd0 != null) {
+                try {
+                    Date dateTime = ifd0.getDate(ExifIFD0Directory.TAG_DATETIME);
+                    if (dateTime != null) {
+                        meta.shotTime = dateTime;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+
+            // 2. GPS：Exif GPS 原始坐标通常是 WGS84
+            if (gpsDirectory != null) {
+                GeoLocation geoLocation = gpsDirectory.getGeoLocation();
+                if (geoLocation != null && !geoLocation.isZero()) {
+                    meta.lat = geoLocation.getLatitude();
+                    meta.lng = geoLocation.getLongitude();
+                }
+            }
+
+            // 两者都没有就返回 null
+            if (meta.shotTime == null && meta.lat == null && meta.lng == null) {
+                return null;
+            }
+            return meta;
+        } catch (ImageProcessingException | IOException e) {
+            return null;
+        }
+    }
+
     private String calculateHash(byte[] bytes) {
         try {
             java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
@@ -142,5 +257,11 @@ public class PhotoServiceImpl implements PhotoService {
             return url.substring(idx + 5);
         }
         return url;
+    }
+
+    private static class PhotoExifMeta {
+        Date shotTime;
+        Double lat;
+        Double lng;
     }
 }

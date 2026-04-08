@@ -1,6 +1,7 @@
 package com.travel.travel_system.repository;
 
 import com.travel.travel_system.model.TrackPoint;
+import com.travel.travel_system.model.enums.TrackPointSource;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -53,15 +54,15 @@ public interface TrackPointRepository extends JpaRepository<TrackPoint, Long> {
      */
     @Query("SELECT t FROM TrackPoint t WHERE t.userId = :userId AND t.ts BETWEEN :startTime AND :endTime")
     List<TrackPoint> findByUserIdAndTimeRange(
-        @Param("userId") Long userId,
-        @Param("startTime") Long startTime,
-        @Param("endTime") Long endTime
+            @Param("userId") Long userId,
+            @Param("startTime") Long startTime,
+            @Param("endTime") Long endTime
     );
 
     /**
      * 根据来源查询轨迹点
      */
-    List<TrackPoint> findByTripIdAndSource(Long tripId, String source);
+    List<TrackPoint> findByTripIdAndSource(Long tripId, TrackPointSource source);
 
     /**
      * 查询最新的轨迹点
@@ -72,4 +73,21 @@ public interface TrackPointRepository extends JpaRepository<TrackPoint, Long> {
      * 查询最早的轨迹点
      */
     TrackPoint findFirstByTripIdOrderByTsAsc(Long tripId);
+
+    /**
+     * 查询某个 trip 下、某个 segment 内、可参与绘制的轨迹点
+     */
+    List<TrackPoint> findByTripIdAndSegmentIdAndRenderEligibleOrderByTsAsc(Long tripId,
+                                                                           Long segmentId,
+                                                                           Boolean renderEligible);
+
+    /**
+     * 查询某个 trip 下、某个 segment 内的全部轨迹点
+     */
+    List<TrackPoint> findByTripIdAndSegmentIdOrderByTsAsc(Long tripId, Long segmentId);
+
+    /**
+     * 查询某个 trip 下全部可参与绘制的轨迹点
+     */
+    List<TrackPoint> findByTripIdAndRenderEligibleOrderByTsAsc(Long tripId, Boolean renderEligible);
 }

@@ -61,4 +61,21 @@ public interface TrackPointService {
      */
     Map<String, TrackPolylineVO> processTrackPoints(Long tripId, List<Map<String, Object>> originalPoints);
 
+    /**
+     * 新版接口：多段轨迹 + 媒体点 + 分段渲染结果
+     *
+     * 返回建议结构：
+     * {
+     *   "rawSegments": List<TrackPolylineVO>,
+     *   "matchedSegments": List<TrackPolylineVO>,
+     *   "reconstructedSegments": List<TrackPolylineVO>,
+     *   "mediaMarkers": List<MapMarkerVO>
+     * }
+     */
+    Map<String, Object> processTrackRendering(Long tripId);
+
+    /**
+     * 标记该 trip 的匹配缓存/路线快照为脏
+     */
+    void markTripMatchDirty(Long tripId);
 }

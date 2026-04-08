@@ -4,9 +4,14 @@ import com.travel.travel_system.algorithm.model.RoadRestriction;
 import com.travel.travel_system.dto.MapMatchingResult;
 import com.travel.travel_system.dto.Projection;
 import com.travel.travel_system.dto.TripRouteSnapshotPayload;
+import com.travel.travel_system.model.Anchor;
 import com.travel.travel_system.model.TrackPoint;
+import com.travel.travel_system.model.TripSegment;
 import com.travel.travel_system.model.enums.CoordType;
+import com.travel.travel_system.model.enums.TrackPointSource;
+import com.travel.travel_system.repository.AnchorRepository;
 import com.travel.travel_system.repository.TrackPointRepository;
+import com.travel.travel_system.repository.TripSegmentRepository;
 import com.travel.travel_system.service.TrackPointService;
 import com.travel.travel_system.service.pub.RedisService;
 import com.travel.travel_system.algorithm.model.*;
@@ -14,8 +19,14 @@ import com.travel.travel_system.algorithm.model.RoadGraph;
 import com.travel.travel_system.algorithm.RoadGraphService;
 import com.travel.travel_system.algorithm.model.RoadSegment;
 import com.travel.travel_system.vo.GeoPointVO;
+import com.travel.travel_system.vo.MapMarkerVO;
 import com.travel.travel_system.vo.TrackPolylineVO;
 import com.travel.travel_system.vo.enums.CoordTypeVO;
+import com.travel.travel_system.vo.enums.MarkerTypeVO;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+import lombok.Data;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -89,6 +100,11 @@ public class TrackPointServiceImpl implements TrackPointService {
 
     @Autowired
     private RedisService redisService;
+    @Autowired
+    private AnchorRepository anchorRepository;
+
+    @Autowired
+    private TripSegmentRepository tripSegmentRepository;
 
     /**
      * 新路网读取体系直接使用重构后的 RoadGraphService，
@@ -175,17 +191,203 @@ public class TrackPointServiceImpl implements TrackPointService {
     @Override
     public List<MapMatchingResult> matchTrajectory(Long tripId) {
         return withMatchingContext(() -> {
-            List<TrackPoint> raw = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
+            List<TrackPoint> raw = buildMatchingInputPoints(tripId);
             if (raw == null || raw.isEmpty()) {
                 return new ArrayList<>();
             }
             return matchTrajectory(raw);
         });
     }
+    private List<TrackPoint> buildMatchingInputPoints(Long tripId) {
+        List<TrackPoint> gpsPoints = trackPointRepository.findByTripIdAndRenderEligibleOrderByTsAsc(tripId, true);
+        if (gpsPoints == null) {
+            gpsPoints = new ArrayList<>();
+        }
+
+        List<Anchor> anchors = anchorRepository.findByTripIdOrderByMatchedTsAsc(tripId);
+        List<TrackPoint> mediaAssistPoints = toVirtualRouteAssistPoints(anchors, gpsPoints);
+
+        List<TrackPoint> merged = new ArrayList<>(gpsPoints.size() + mediaAssistPoints.size());
+        merged.addAll(gpsPoints);
+        merged.addAll(mediaAssistPoints);
+
+        merged.sort((a, b) -> {
+            int segCmp = compareNullableLong(a.getSegmentId(), b.getSegmentId());
+            if (segCmp != 0) {
+                return segCmp;
+            }
+
+            int tsCmp = compareNullableLong(a.getTs(), b.getTs());
+            if (tsCmp != 0) {
+                return tsCmp;
+            }
+
+            int sourceCmp = Integer.compare(sourcePriority(a), sourcePriority(b));
+            if (sourceCmp != 0) {
+                return sourceCmp;
+            }
+
+            return compareNullableLong(a.getId(), b.getId());
+        });
+
+        return deduplicateMatchingInputs(merged);
+    }
+
+    private List<TrackPoint> toVirtualRouteAssistPoints(List<Anchor> anchors, List<TrackPoint> gpsPoints) {
+        List<TrackPoint> result = new ArrayList<>();
+        if (anchors == null || anchors.isEmpty()) {
+            return result;
+        }
+
+        for (Anchor anchor : anchors) {
+            if (anchor == null) {
+                continue;
+            }
+            if (!Boolean.TRUE.equals(anchor.getRouteEligible())) {
+                continue;
+            }
+            if (anchor.getLatEnc() == null || anchor.getLngEnc() == null) {
+                continue;
+            }
+            if (anchor.getSegmentId() == null) {
+                continue;
+            }
+
+            String status = anchor.getProjectionStatus();
+            if (status != null
+                    && !"PROJECTED".equalsIgnoreCase(status)
+                    && !"MANUAL_FIXED".equalsIgnoreCase(status)) {
+                continue;
+            }
+
+            Long sortTs = anchor.getMediaTs() != null ? anchor.getMediaTs() : anchor.getMatchedTs();
+            if (sortTs == null) {
+                continue;
+            }
+
+            // P0 修复：
+            // 只有手动点，或者当前 segment / 当前时刻附近 GPS 稀疏时，才把媒体点插入匹配输入
+            boolean shouldInject = Boolean.TRUE.equals(anchor.getManualOverride())
+                    || isSparseGpsAround(gpsPoints, anchor.getSegmentId(), sortTs);
+
+            if (!shouldInject) {
+                continue;
+            }
+
+            TrackPoint virtualPoint = new TrackPoint();
+            virtualPoint.setId(anchor.getId() == null ? null : -anchor.getId());
+            virtualPoint.setUserId(anchor.getUserId());
+            virtualPoint.setTripId(anchor.getTripId());
+            virtualPoint.setTs(sortTs);
+            virtualPoint.setLatEnc(anchor.getLatEnc());
+            virtualPoint.setLngEnc(anchor.getLngEnc());
+            virtualPoint.setAccuracyM(5.0f);
+            virtualPoint.setSpeedMps(null);
+            virtualPoint.setHeadingDeg(null);
+            virtualPoint.setRawCoordType(CoordType.WGS84);
+            virtualPoint.setSegmentId(anchor.getSegmentId());
+            virtualPoint.setRenderEligible(true);
+            virtualPoint.setSource(Boolean.TRUE.equals(anchor.getManualOverride())
+                    ? com.travel.travel_system.model.enums.TrackPointSource.MANUAL
+                    : com.travel.travel_system.model.enums.TrackPointSource.EXIF);
+            virtualPoint.setCreatedAt(anchor.getCreatedAt() == null ? new Date() : anchor.getCreatedAt());
+
+            result.add(virtualPoint);
+        }
+
+        return result;
+    }
+    private boolean isSparseGpsAround(List<TrackPoint> gpsPoints, Long segmentId, Long ts) {
+        if (gpsPoints == null || gpsPoints.isEmpty() || ts == null) {
+            return true;
+        }
+
+        int segmentCount = 0;
+        Long nearestDelta = null;
+
+        for (TrackPoint point : gpsPoints) {
+            if (!Objects.equals(segmentId, point.getSegmentId())) {
+                continue;
+            }
+            segmentCount++;
+
+            if (point.getTs() != null) {
+                long delta = Math.abs(point.getTs() - ts);
+                if (nearestDelta == null || delta < nearestDelta) {
+                    nearestDelta = delta;
+                }
+            }
+        }
+
+        // 当前 segment 本身很稀疏
+        if (segmentCount < 3) {
+            return true;
+        }
+
+        // 15 秒内没有 GPS 点，认为稀疏
+        return nearestDelta == null || nearestDelta > 15_000L;
+    }
+
+    private List<TrackPoint> deduplicateMatchingInputs(List<TrackPoint> points) {
+        if (points == null || points.size() <= 1) {
+            return points == null ? new ArrayList<>() : points;
+        }
+
+        List<TrackPoint> result = new ArrayList<>();
+        for (TrackPoint current : points) {
+            if (result.isEmpty()) {
+                result.add(current);
+                continue;
+            }
+
+            TrackPoint last = result.get(result.size() - 1);
+
+            boolean sameSegment = Objects.equals(last.getSegmentId(), current.getSegmentId());
+            boolean closeInTime = last.getTs() != null && current.getTs() != null
+                    && Math.abs(last.getTs() - current.getTs()) <= 2000L;
+
+            double lastLat = decodeDouble(last.getLatEnc());
+            double lastLng = decodeDouble(last.getLngEnc());
+            double curLat = decodeDouble(current.getLatEnc());
+            double curLng = decodeDouble(current.getLngEnc());
+
+            boolean closeInSpace = isValidCoordinate(lastLat, lastLng)
+                    && isValidCoordinate(curLat, curLng)
+                    && haversineMetersStatic(lastLat, lastLng, curLat, curLng) <= 12.0;
+
+            if (sameSegment && closeInTime && closeInSpace) {
+                if (sourcePriority(current) < sourcePriority(last)) {
+                    result.set(result.size() - 1, current);
+                }
+            } else {
+                result.add(current);
+            }
+        }
+        return result;
+    }
+
+    private int sourcePriority(TrackPoint point) {
+        if (point == null || point.getSource() == null) {
+            return 99;
+        }
+        return switch (point.getSource()) {
+            case MANUAL -> 0;
+            case WX_FG -> 1;
+            case WX_BG -> 2;
+            case EXIF -> 3;
+        };
+    }
+
+    private int compareNullableLong(Long a, Long b) {
+        if (a == null && b == null) return 0;
+        if (a == null) return 1;
+        if (b == null) return -1;
+        return Long.compare(a, b);
+    }
 
     public List<MapMatchingResult> matchTrajectory(List<TrackPoint> trackPoints) {
         return withMatchingContext(() -> {
-            List<TrackPoint> prepared = smoothTrackPoints(normalizeTrackPointsToWgs84(trackPoints));
+            List<TrackPoint> prepared = smoothTrackPointsPreserveAssistPoints(normalizeTrackPointsToWgs84(trackPoints));
             if (prepared.isEmpty()) {
                 return new ArrayList<>();
             }
@@ -266,6 +468,59 @@ public class TrackPointServiceImpl implements TrackPointService {
             logConnectivitySummary("[MAP_MATCH_FINAL_CONNECT]", merged, loadContext.getMergedGraph());
             return merged;
         });
+    }
+    private List<TrackPoint> smoothTrackPointsPreserveAssistPoints(List<TrackPoint> trackPoints) {
+        if (trackPoints == null || trackPoints.size() < 3) {
+            return trackPoints == null ? new ArrayList<>() : trackPoints;
+        }
+
+        List<TrackPoint> sorted = sortByTimestamp(trackPoints);
+        List<TrackPoint> smoothed = new ArrayList<>(sorted.size());
+
+        for (int i = 0; i < sorted.size(); i++) {
+            TrackPoint current = sorted.get(i);
+
+            // 媒体辅助点 / 手动点不做普通平滑，原样保留
+            if (current.getSource() == com.travel.travel_system.model.enums.TrackPointSource.EXIF
+                    || current.getSource() == com.travel.travel_system.model.enums.TrackPointSource.MANUAL) {
+                smoothed.add(copyTrackPoint(current));
+                continue;
+            }
+
+            int from = Math.max(0, i - 2);
+            int to = Math.min(sorted.size() - 1, i + 2);
+
+            double latSum = 0.0;
+            double lonSum = 0.0;
+            double weightSum = 0.0;
+
+            for (int j = from; j <= to; j++) {
+                TrackPoint neighbor = sorted.get(j);
+
+                // 邻域里也跳过媒体辅助点，避免把 GPS 平滑到媒体点上
+                if (neighbor.getSource() == com.travel.travel_system.model.enums.TrackPointSource.EXIF
+                        || neighbor.getSource() == com.travel.travel_system.model.enums.TrackPointSource.MANUAL) {
+                    continue;
+                }
+
+                double weight = 1.0 / (1.0 + Math.abs(i - j));
+                latSum += decodeDouble(neighbor.getLatEnc()) * weight;
+                lonSum += decodeDouble(neighbor.getLngEnc()) * weight;
+                weightSum += weight;
+            }
+
+            if (weightSum <= 0.0) {
+                smoothed.add(copyTrackPoint(current));
+                continue;
+            }
+
+            TrackPoint copy = copyTrackPoint(current);
+            copy.setLatEnc(encodeDouble(latSum / weightSum));
+            copy.setLngEnc(encodeDouble(lonSum / weightSum));
+            smoothed.add(copy);
+        }
+
+        return smoothed;
     }
 
 
@@ -969,6 +1224,117 @@ public class TrackPointServiceImpl implements TrackPointService {
         result.setConfidence(Math.max(0.05, 1.0 / (1.0 + matched.distanceMeters)));
         return result;
     }
+    public List<MapMatchingResult> getLatestMatchedCacheOrCompute(Long tripId) {
+        List<MapMatchingResult> cached = getLatestMatchedCache(tripId);
+        if (cached != null && !cached.isEmpty()) {
+            return cached;
+        }
+        return matchTrajectory(tripId);
+    }
+
+    public double minDistanceToTrip(Long tripId, Double lat, Double lng) {
+        if (lat == null || lng == null) {
+            return Double.MAX_VALUE;
+        }
+        List<TrackPoint> points = trackPointRepository.findByTripIdAndRenderEligibleOrderByTsAsc(tripId, true);
+        double best = Double.MAX_VALUE;
+        for (TrackPoint point : points) {
+            double pLat = decodeDouble(point.getLatEnc());
+            double pLng = decodeDouble(point.getLngEnc());
+            double d = haversineMetersStatic(lat, lng, pLat, pLng);
+            if (d < best) {
+                best = d;
+            }
+        }
+        return best;
+    }
+
+    public RouteSupportProjection projectTimestampToRoute(Long tripId, Long segmentId, Long ts) {
+        RouteSupportProjection result = new RouteSupportProjection();
+        if (ts == null) {
+            return result;
+        }
+
+        List<TrackPoint> points = trackPointRepository.findByTripIdAndRenderEligibleOrderByTsAsc(tripId, true);
+        TrackPoint best = null;
+        long bestDelta = Long.MAX_VALUE;
+
+        for (TrackPoint point : points) {
+            if (segmentId != null && !Objects.equals(segmentId, point.getSegmentId())) {
+                continue;
+            }
+            if (!Boolean.TRUE.equals(point.getRenderEligible())) {
+                continue;
+            }
+            long delta = Math.abs(point.getTs() - ts);
+            if (delta < bestDelta) {
+                bestDelta = delta;
+                best = point;
+            }
+        }
+
+        if (best != null) {
+            result.setMatchedTs(best.getTs());
+            result.setLat(decodeDouble(best.getLatEnc()));
+            result.setLng(decodeDouble(best.getLngEnc()));
+            result.setConfidence(0.65f);
+            result.setRouteEligible(false);
+        }
+
+        return result;
+    }
+
+    public RouteSupportProjection projectObservationToRoute(Long tripId,
+                                                            Long segmentId,
+                                                            Long ts,
+                                                            Double lat,
+                                                            Double lng,
+                                                            CoordType coordType) {
+        RouteSupportProjection result = new RouteSupportProjection();
+        if (lat == null || lng == null) {
+            return result;
+        }
+
+        List<TrackPoint> points = trackPointRepository.findByTripIdAndRenderEligibleOrderByTsAsc(tripId, true);
+        TrackPoint best = null;
+        double bestDistance = Double.MAX_VALUE;
+
+        for (TrackPoint point : points) {
+            if (segmentId != null && !Objects.equals(segmentId, point.getSegmentId())) {
+                continue;
+            }
+            if (!Boolean.TRUE.equals(point.getRenderEligible())) {
+                continue;
+            }
+            double pLat = decodeDouble(point.getLatEnc());
+            double pLng = decodeDouble(point.getLngEnc());
+            double d = haversineMetersStatic(lat, lng, pLat, pLng);
+            if (d < bestDistance) {
+                bestDistance = d;
+                best = point;
+            }
+        }
+
+        if (best != null) {
+            result.setMatchedTs(best.getTs());
+
+            // 骨架策略：
+            // 靠近轨迹时吸附到最近轨迹点；过远时保留原始媒体点位
+            if (bestDistance <= 40.0) {
+                result.setLat(decodeDouble(best.getLatEnc()));
+                result.setLng(decodeDouble(best.getLngEnc()));
+                result.setRouteEligible(true);
+                result.setConfidence(0.85f);
+            } else {
+                result.setLat(lat);
+                result.setLng(lng);
+                result.setRouteEligible(false);
+                result.setConfidence(0.55f);
+            }
+        }
+
+        return result;
+    }
 
     private Projection projectToSegment(RoadSegment segment, double lat, double lon) {
         List<GeoCoord> geometry = segment.getGeometry();
@@ -1283,19 +1649,115 @@ public class TrackPointServiceImpl implements TrackPointService {
 
     @Override
     public Map<String, TrackPolylineVO> processTrackPoints(Long tripId, List<Map<String, Object>> originalPoints) {
-        List<TrackPoint> rawTrackPoints = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
-        List<MapMatchingResult> matched = getLatestMatchedCache(tripId);
-        CoordTypeVO displayCoordType = resolveDisplayCoordType(rawTrackPoints);
+        Map<String, Object> render = processTrackRendering(tripId);
 
-        TrackPolylineVO rawPolyline = buildRawPolyline(rawTrackPoints, displayCoordType);
-        TrackPolylineVO matchedPolyline = buildMatchedPolyline(matched, displayCoordType);
-        TrackPolylineVO reconstructedPolyline = buildReconstructedPolyline(matched, displayCoordType);
+        @SuppressWarnings("unchecked")
+        List<TrackPolylineVO> rawSegments = (List<TrackPolylineVO>) render.getOrDefault("rawSegments", Collections.emptyList());
+
+        @SuppressWarnings("unchecked")
+        List<TrackPolylineVO> matchedSegments = (List<TrackPolylineVO>) render.getOrDefault("matchedSegments", Collections.emptyList());
+
+        @SuppressWarnings("unchecked")
+        List<TrackPolylineVO> reconstructedSegments =
+                (List<TrackPolylineVO>) render.getOrDefault("reconstructedSegments", Collections.emptyList());
 
         Map<String, TrackPolylineVO> result = new HashMap<>();
-        result.put("rawPolyline", rawPolyline);
-        result.put("matchedPolyline", matchedPolyline);
-        result.put("reconstructedPolyline", reconstructedPolyline);
+        result.put("rawPolyline", mergeSegments(rawSegments));
+        result.put("matchedPolyline", mergeSegments(matchedSegments));
+        result.put("reconstructedPolyline", mergeSegments(reconstructedSegments));
         return result;
+    }
+
+    private TrackPolylineVO mergeSegments(List<TrackPolylineVO> segments) {
+        List<GeoPointVO> points = new ArrayList<>();
+        if (segments != null) {
+            for (TrackPolylineVO segment : segments) {
+                if (segment != null && segment.getPoints() != null) {
+                    points.addAll(segment.getPoints());
+                }
+            }
+        }
+        return TrackPolylineVO.builder()
+                .points(points)
+                .distanceM(0L)
+                .simplified(false)
+                .build();
+    }
+
+    @Override
+    public Map<String, Object> processTrackRendering(Long tripId) {
+        List<TripSegment> segments = tripSegmentRepository.findByTripIdOrderBySegmentNoAsc(tripId);
+        List<TrackPoint> allTrackPoints = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
+        List<Anchor> anchors = anchorRepository.findByTripIdOrderByMatchedTsAsc(tripId);
+
+        CoordTypeVO displayCoordType = resolveDisplayCoordType(allTrackPoints);
+
+        List<TrackPolylineVO> rawSegments = new ArrayList<>();
+        List<TrackPolylineVO> matchedSegments = new ArrayList<>();
+        List<TrackPolylineVO> reconstructedSegments = new ArrayList<>();
+
+        for (TripSegment segment : segments) {
+            List<TrackPoint> segmentPoints = new ArrayList<>();
+            for (TrackPoint point : allTrackPoints) {
+                if (Objects.equals(point.getSegmentId(), segment.getId())
+                        && Boolean.TRUE.equals(point.getRenderEligible())) {
+                    segmentPoints.add(point);
+                }
+            }
+
+            if (segmentPoints.isEmpty()) {
+                continue;
+            }
+
+            rawSegments.add(buildRawPolyline(segmentPoints, displayCoordType));
+
+            List<MapMatchingResult> matched = matchTrajectory(segmentPoints);
+            matchedSegments.add(buildMatchedPolyline(matched, displayCoordType));
+            reconstructedSegments.add(buildReconstructedPolyline(matched, displayCoordType));
+        }
+
+        List<MapMarkerVO> mediaMarkers = buildMediaMarkers(anchors, displayCoordType);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("rawSegments", rawSegments);
+        result.put("matchedSegments", matchedSegments);
+        result.put("reconstructedSegments", reconstructedSegments);
+        result.put("mediaMarkers", mediaMarkers);
+        return result;
+    }
+
+    private List<MapMarkerVO> buildMediaMarkers(List<Anchor> anchors, CoordTypeVO displayCoordType) {
+        List<MapMarkerVO> markers = new ArrayList<>();
+        if (anchors == null) {
+            return markers;
+        }
+
+        for (Anchor anchor : anchors) {
+            if (anchor.getLatEnc() == null || anchor.getLngEnc() == null) {
+                continue;
+            }
+
+            double lat = decodeDouble(anchor.getLatEnc());
+            double lng = decodeDouble(anchor.getLngEnc());
+            double[] display = fromInternalWgs84ToDisplay(lat, lng, displayCoordType);
+
+            String type = anchor.getPhotoId() != null ? "photo-anchor" : "video-anchor";
+            String title = anchor.getPhotoId() != null ? "照片" : "视频";
+
+            markers.add(MapMarkerVO.builder()
+                    .id(type + "-" + anchor.getId())
+                    .type(MarkerTypeVO.valueOf(type))
+                    .point(GeoPointVO.builder()
+                            .lat(display[0])
+                            .lng(display[1])
+                            .coordType(displayCoordType)
+                            .build())
+                    .title(title)
+                    .subTitle(anchor.getProjectionStatus())
+                    .build());
+        }
+
+        return markers;
     }
 
     private TrackPolylineVO buildRawPolyline(List<TrackPoint> rawTrackPoints, CoordTypeVO displayCoordType) {
@@ -1396,7 +1858,10 @@ public class TrackPointServiceImpl implements TrackPointService {
                 redisService.deleteKey(dirtyKey(tripId));
                 return false;
             }
-            String startFingerprint = buildFingerprint(tripId, before);
+            List<TrackPoint> effectiveTrackPoints = trackPointRepository.findByTripIdAndRenderEligibleOrderByTsAsc(tripId, true);
+            List<Anchor> routeEligibleAnchors = findRouteEligibleAnchorsForSnapshot(tripId);
+            List<TripSegment> segments = tripSegmentRepository.findByTripIdOrderBySegmentNoAsc(tripId);
+            String startFingerprint = buildFingerprint(tripId, effectiveTrackPoints, routeEligibleAnchors, segments);
             String cachedFingerprint = redisService.getString(fingerprintKey(tripId));
             boolean dirty = redisService.hasKey(dirtyKey(tripId));
             if (!dirty && Objects.equals(startFingerprint, cachedFingerprint)) {
@@ -1404,7 +1869,7 @@ public class TrackPointServiceImpl implements TrackPointService {
             }
             List<MapMatchingResult> results = matchTrajectory(before);
             List<TrackPoint> after = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
-            String endFingerprint = buildFingerprint(tripId, after);
+            String endFingerprint = buildFingerprint(tripId, effectiveTrackPoints, routeEligibleAnchors, segments);
             if (!Objects.equals(startFingerprint, endFingerprint)) {
                 markTripMatchDirty(tripId);
                 log.warn("[TRACK_MATCH_RECOMPUTE] fingerprint changed during recompute, skip overwrite tripId={} startFp={} endFp={}", tripId, startFingerprint, endFingerprint);
@@ -1440,30 +1905,63 @@ public class TrackPointServiceImpl implements TrackPointService {
         return resequenceCopy(payload.results);
     }
 
-    public String getMatchAlgoVersion() {
-        return MATCH_ALGO_VERSION;
-    }
-
-    public String buildCurrentTripFingerprint(Long tripId) {
-        List<TrackPoint> raw = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
-        return buildFingerprint(tripId, raw);
-    }
-
     public TripRouteSnapshotPayload buildRouteSnapshotPayload(Long tripId) {
-        List<TrackPoint> rawTrackPoints = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
+        List<TrackPoint> effectiveTrackPoints = trackPointRepository.findByTripIdAndRenderEligibleOrderByTsAsc(tripId, true);
+        List<Anchor> routeEligibleAnchors = findRouteEligibleAnchorsForSnapshot(tripId);
+        List<TripSegment> segments = tripSegmentRepository.findByTripIdOrderBySegmentNoAsc(tripId);
         List<MapMatchingResult> matched = getLatestMatchedCache(tripId);
+
         TripRouteSnapshotPayload payload = new TripRouteSnapshotPayload();
         payload.setTripId(tripId);
         payload.setAlgoVersion(MATCH_ALGO_VERSION);
-        payload.setFingerprint(buildFingerprint(tripId, rawTrackPoints));
-        payload.setPointCount(rawTrackPoints == null ? 0 : rawTrackPoints.size());
-        payload.setStartTs(rawTrackPoints == null || rawTrackPoints.isEmpty() ? null : rawTrackPoints.get(0).getTs());
-        payload.setEndTs(rawTrackPoints == null || rawTrackPoints.isEmpty() ? null : rawTrackPoints.get(rawTrackPoints.size() - 1).getTs());
+        payload.setFingerprint(buildFingerprint(tripId, effectiveTrackPoints, routeEligibleAnchors, segments));
+        payload.setPointCount(effectiveTrackPoints == null ? 0 : effectiveTrackPoints.size());
+        payload.setStartTs(effectiveTrackPoints == null || effectiveTrackPoints.isEmpty() ? null : effectiveTrackPoints.get(0).getTs());
+        payload.setEndTs(effectiveTrackPoints == null || effectiveTrackPoints.isEmpty()
+                ? null
+                : effectiveTrackPoints.get(effectiveTrackPoints.size() - 1).getTs());
         payload.setGeneratedAt(System.currentTimeMillis());
         payload.setMatchedResults(resequenceCopy(matched));
         payload.setMatchedPolyline(buildMatchedPolyline(matched, CoordTypeVO.GCJ02));
         payload.setReconstructedPolyline(buildReconstructedPolyline(matched, CoordTypeVO.GCJ02));
+
+        // 如果你的 TripRouteSnapshotPayload 已经补了这两个字段，就打开这两行
+        // payload.setMediaPointCount(routeEligibleAnchors == null ? 0 : routeEligibleAnchors.size());
+        // payload.setSegmentCount(segments == null ? 0 : segments.size());
+
         return payload;
+    }
+    private List<Anchor> findRouteEligibleAnchorsForSnapshot(Long tripId) {
+        List<Anchor> anchors = anchorRepository.findByTripIdOrderByMatchedTsAsc(tripId);
+        if (anchors == null || anchors.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<Anchor> result = new ArrayList<>();
+        for (Anchor anchor : anchors) {
+            if (anchor == null) {
+                continue;
+            }
+            if (!Boolean.TRUE.equals(anchor.getRouteEligible())) {
+                continue;
+            }
+            if (anchor.getSegmentId() == null) {
+                continue;
+            }
+            if (anchor.getLatEnc() == null || anchor.getLngEnc() == null) {
+                continue;
+            }
+
+            String status = anchor.getProjectionStatus();
+            if (status != null
+                    && !"PROJECTED".equalsIgnoreCase(status)
+                    && !"MANUAL_FIXED".equalsIgnoreCase(status)) {
+                continue;
+            }
+
+            result.add(anchor);
+        }
+        return result;
     }
 
     public void warmLatestCacheFromSnapshot(TripRouteSnapshotPayload payload) {
@@ -1500,8 +1998,106 @@ public class TrackPointServiceImpl implements TrackPointService {
         return MATCH_LOCK_KEY_PREFIX + tripId;
     }
 
-    private String buildFingerprint(Long tripId, List<TrackPoint> raw) {
-        return tripId + ":" + pointCount(raw) + ":" + lastTimestamp(raw) + ":" + MATCH_ALGO_VERSION;
+    private String buildFingerprint(Long tripId,
+                                    List<TrackPoint> effectiveTrackPoints,
+                                    List<Anchor> routeEligibleAnchors,
+                                    List<TripSegment> segments) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+
+            updateDigest(digest, "tripId");
+            updateDigest(digest, tripId);
+
+            updateDigest(digest, "algo");
+            updateDigest(digest, MATCH_ALGO_VERSION);
+
+            // 1) GPS / 有效轨迹点
+            updateDigest(digest, "gpsCount");
+            updateDigest(digest, effectiveTrackPoints == null ? 0 : effectiveTrackPoints.size());
+
+            if (effectiveTrackPoints != null) {
+                for (TrackPoint point : effectiveTrackPoints) {
+                    if (point == null) {
+                        continue;
+                    }
+                    updateDigest(digest, point.getId());
+                    updateDigest(digest, point.getTs());
+                    updateDigest(digest, point.getSegmentId());
+                    updateDigest(digest, point.getRenderEligible());
+                    updateDigest(digest, point.getSource() == null ? null : point.getSource().name());
+                    updateDigest(digest, point.getRawCoordType() == null ? null : point.getRawCoordType().name());
+                    updateDigest(digest, point.getLatEnc());
+                    updateDigest(digest, point.getLngEnc());
+                }
+            }
+
+            // 2) routeEligible 媒体 anchor
+            updateDigest(digest, "anchorCount");
+            updateDigest(digest, routeEligibleAnchors == null ? 0 : routeEligibleAnchors.size());
+
+            if (routeEligibleAnchors != null) {
+                for (Anchor anchor : routeEligibleAnchors) {
+                    if (anchor == null) {
+                        continue;
+                    }
+                    updateDigest(digest, anchor.getId());
+                    updateDigest(digest, anchor.getPhotoId());
+                    updateDigest(digest, anchor.getVideoId());
+                    updateDigest(digest, anchor.getMediaTs());
+                    updateDigest(digest, anchor.getMatchedTs());
+                    updateDigest(digest, anchor.getSegmentId());
+                    updateDigest(digest, anchor.getRouteEligible());
+                    updateDigest(digest, anchor.getProjectionStatus());
+                    updateDigest(digest, anchor.getManualOverride());
+                    updateDigest(digest, anchor.getMatchMethod() == null ? null : anchor.getMatchMethod().name());
+                    updateDigest(digest, anchor.getLatEnc());
+                    updateDigest(digest, anchor.getLngEnc());
+                }
+            }
+
+            // 3) trip segment
+            updateDigest(digest, "segmentCount");
+            updateDigest(digest, segments == null ? 0 : segments.size());
+
+            if (segments != null) {
+                for (TripSegment segment : segments) {
+                    if (segment == null) {
+                        continue;
+                    }
+                    updateDigest(digest, segment.getId());
+                    updateDigest(digest, segment.getSegmentNo());
+                    updateDigest(digest, segment.getStartTs());
+                    updateDigest(digest, segment.getEndTs());
+                    updateDigest(digest, segment.getStartReason());
+                    updateDigest(digest, segment.getEndReason());
+                    updateDigest(digest, segment.getIsClosed());
+                }
+            }
+
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (Exception e) {
+            // 极端情况下兜底，不让 fingerprint 为空
+            return tripId + ":" + System.currentTimeMillis() + ":" + MATCH_ALGO_VERSION;
+        }
+    }
+    private void updateDigest(MessageDigest digest, Object value) {
+        if (digest == null) {
+            return;
+        }
+        if (value == null) {
+            digest.update((byte) 0);
+            return;
+        }
+
+        if (value instanceof byte[] bytes) {
+            digest.update((byte) 1);
+            digest.update(bytes);
+            return;
+        }
+
+        digest.update((byte) 2);
+        digest.update(String.valueOf(value).getBytes(StandardCharsets.UTF_8));
+        digest.update((byte) '|');
     }
 
     private int pointCount(List<TrackPoint> raw) {
@@ -1864,15 +2460,6 @@ public class TrackPointServiceImpl implements TrackPointService {
 
     private byte[] encodeDouble(double value) {
         return encodeDoubleStatic(value);
-    }
-
-    private static byte[] encodeDoubleStatic(double value) {
-        long bits = Double.doubleToLongBits(value);
-        byte[] bytes = new byte[8];
-        for (int i = 0; i < 8; i++) {
-            bytes[i] = (byte) (bits >> (i * 8));
-        }
-        return bytes;
     }
 
     private static final double PI = Math.PI;
@@ -2258,10 +2845,45 @@ public class TrackPointServiceImpl implements TrackPointService {
         return Math.round(value * 1_000_000.0) / 1_000_000.0;
     }
 
+    private boolean isValidCoordinate(double lat, double lng) {
+        return !Double.isNaN(lat)
+                && !Double.isNaN(lng)
+                && lat >= -90.0 && lat <= 90.0
+                && lng >= -180.0 && lng <= 180.0;
+    }
+
     private void resequence(List<MapMatchingResult> merged) {
         for (int i = 0; i < merged.size(); i++) {
             merged.get(i).setPosition(i);
         }
+    }
+    public static byte[] encodeDoubleStatic(double value) {
+        return java.nio.ByteBuffer.allocate(8)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                .putDouble(value)
+                .array();
+    }
+
+    public static double decodeDoubleStatic(byte[] bytes) {
+        if (bytes == null) {
+            return 0.0;
+        }
+        return java.nio.ByteBuffer.wrap(java.util.Arrays.copyOf(bytes, 8))
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                .getDouble();
+    }
+
+    public static double haversineMetersStatic(double lat1, double lon1, double lat2, double lon2) {
+        double rLat1 = Math.toRadians(lat1);
+        double rLon1 = Math.toRadians(lon1);
+        double rLat2 = Math.toRadians(lat2);
+        double rLon2 = Math.toRadians(lon2);
+        double dLat = rLat2 - rLat1;
+        double dLon = rLon2 - rLon1;
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(rLat1) * Math.cos(rLat2)
+                * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
     public static class LatestMatchPayload {
@@ -2404,5 +3026,16 @@ public class TrackPointServiceImpl implements TrackPointService {
             this.distanceMeters = distanceMeters;
             this.offsetMeters = offsetMeters;
         }
+    }
+
+    @Data
+    public static class RouteSupportProjection {
+        private Long matchedTs;
+        private Double lat;
+        private Double lng;
+        private Float confidence;
+        private boolean routeEligible;
+        private boolean manualFixed;
+
     }
 }

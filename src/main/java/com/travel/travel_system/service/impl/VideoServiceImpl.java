@@ -3,18 +3,28 @@ package com.travel.travel_system.service.impl;
 import com.travel.travel_system.model.Anchor;
 import com.travel.travel_system.model.Trip;
 import com.travel.travel_system.model.Video;
-import com.travel.travel_system.model.enums.MatchMethod;
 import com.travel.travel_system.model.enums.PrivacyMode;
 import com.travel.travel_system.model.enums.VideoProcessingStatus;
 import com.travel.travel_system.repository.AnchorRepository;
 import com.travel.travel_system.repository.TripRepository;
 import com.travel.travel_system.repository.VideoRepository;
+import com.travel.travel_system.service.MediaAnchorProjectionService;
 import com.travel.travel_system.service.VideoService;
 import com.travel.travel_system.service.pub.OssService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.util.Iterator;
 
 import java.io.IOException;
 import java.util.Date;
@@ -25,15 +35,16 @@ public class VideoServiceImpl implements VideoService {
 
     @Autowired
     private VideoRepository videoRepository;
-
     @Autowired
     private TripRepository tripRepository;
-
     @Autowired
     private AnchorRepository anchorRepository;
-
     @Autowired
     private OssService ossService;
+    @Autowired
+    private MediaAnchorProjectionService mediaAnchorProjectionService;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
     @Transactional
@@ -45,7 +56,7 @@ public class VideoServiceImpl implements VideoService {
         try {
             objectKey = ossService.uploadFile(file, "videos/" + tripId);
         } catch (IOException e) {
-            throw new RuntimeException("视频上传失败: " + e.getMessage());
+            throw new RuntimeException("视频上传失败: " + e.getMessage(), e);
         }
 
         Video video = new Video();
@@ -54,24 +65,39 @@ public class VideoServiceImpl implements VideoService {
         video.setObjectKey(objectKey);
         video.setFileHash(calculateHash(file));
         video.setFileSize(file.getSize());
-        video.setShotTimeExif(new Date());
         video.setCreatedAt(new Date());
         video.setUserCaption(userCaption);
         video.setPrivacyMode(PrivacyMode.PUBLIC);
         video.setProcessingStatus(VideoProcessingStatus.PENDING);
+        video.setBindingStatus("PENDING");
+
+        VideoMeta meta = readVideoMeta(file);
+        if (meta != null) {
+            video.setShotTimeExif(meta.shotTime);
+            if (meta.lat != null && meta.lng != null) {
+                video.setLatEnc(TrackPointServiceImpl.encodeDoubleStatic(meta.lat));
+                video.setLngEnc(TrackPointServiceImpl.encodeDoubleStatic(meta.lng));
+                video.setCaptureCoordSource("EXIF");
+                video.setCaptureCoordType("WGS84");
+            } else {
+                video.setCaptureCoordSource("NONE");
+                video.setCaptureCoordType(null);
+            }
+            video.setCaptureTimeSource(meta.shotTime != null ? "EXIF" : "NONE");
+            video.setDurationSec(meta.durationSec);
+            video.setResolution(meta.resolution);
+        } else {
+            // P0 修复：不要再把 uploadTime 当成拍摄时间
+            video.setShotTimeExif(null);
+            video.setCaptureTimeSource("NONE");
+            video.setCaptureCoordSource("NONE");
+            video.setCaptureCoordType(null);
+        }
 
         Video savedVideo = videoRepository.save(video);
 
-        Anchor anchor = new Anchor();
-        anchor.setUserId(trip.getUserId());
-        anchor.setTripId(tripId);
-        anchor.setVideoId(savedVideo.getId());
-        anchor.setMatchedTs(System.currentTimeMillis());
-        anchor.setMatchMethod(MatchMethod.MANUAL_PICK);
-        anchor.setConfidence(1.0f);
-        anchor.setManualOverride(false);
-        anchor.setCreatedAt(new Date());
-        anchorRepository.save(anchor);
+        // 统一走投影服务
+        mediaAnchorProjectionService.projectVideoAnchor(savedVideo.getId(), tripId);
 
         return savedVideo;
     }
@@ -149,13 +175,281 @@ public class VideoServiceImpl implements VideoService {
         videoRepository.save(video);
 
         try {
-            Thread.sleep(1000);
+            // TODO: 转码、抽帧、封面生成等
             video.setProcessingStatus(VideoProcessingStatus.COMPLETED);
+
+            // 元数据完善后可以再次投影
+            mediaAnchorProjectionService.projectVideoAnchor(videoId, video.getTripId());
         } catch (Exception e) {
             video.setProcessingStatus(VideoProcessingStatus.FAILED);
         }
 
         videoRepository.save(video);
+    }
+
+    @Override
+    @Transactional
+    public Video updateVideoAssistInfo(Long videoId, Long captureTsOverride, Double manualLat, Double manualLng, String coordType) {
+        Video video = videoRepository.findById(videoId)
+                .orElseThrow(() -> new RuntimeException("视频不存在，videoId: " + videoId));
+
+        video.setCaptureTsOverride(captureTsOverride);
+
+        if (manualLat != null && manualLng != null) {
+            video.setCaptureLatOverride(TrackPointServiceImpl.encodeDoubleStatic(manualLat));
+            video.setCaptureLngOverride(TrackPointServiceImpl.encodeDoubleStatic(manualLng));
+            video.setCaptureCoordSource("MANUAL");
+            video.setCaptureCoordType(coordType != null && !coordType.isBlank() ? coordType.toUpperCase() : "GCJ02");
+        } else {
+            video.setCaptureLatOverride(null);
+            video.setCaptureLngOverride(null);
+            if (captureTsOverride != null) {
+                video.setCaptureCoordSource("NONE");
+                video.setCaptureCoordType(null);
+            }
+        }
+
+        if (captureTsOverride != null) {
+            video.setCaptureTimeSource("USER_INPUT");
+        }
+
+        Video saved = videoRepository.save(video);
+
+        mediaAnchorProjectionService.projectVideoAnchor(saved.getId(), saved.getTripId());
+        return saved;
+    }
+
+    private VideoMeta readVideoMeta(MultipartFile file) {
+        if (file == null || file.isEmpty()) {
+            return null;
+        }
+
+        Path tempFile = null;
+        try {
+            String suffix = ".tmp";
+            String originalName = file.getOriginalFilename();
+            if (originalName != null) {
+                int dot = originalName.lastIndexOf('.');
+                if (dot >= 0 && dot < originalName.length() - 1) {
+                    suffix = originalName.substring(dot);
+                }
+            }
+
+            tempFile = Files.createTempFile("video-meta-", suffix);
+            file.transferTo(tempFile.toFile());
+
+            ProcessBuilder pb = new ProcessBuilder(
+                    "ffprobe",
+                    "-v", "quiet",
+                    "-print_format", "json",
+                    "-show_entries",
+                    "format=duration:format_tags=creation_time,location,location-eng,com.apple.quicktime.location.ISO6709:"
+                            + "stream=codec_type,width,height:stream_tags=creation_time,location,location-eng,com.apple.quicktime.location.ISO6709",
+                    tempFile.toAbsolutePath().toString()
+            );
+            pb.redirectErrorStream(true);
+
+            Process process = pb.start();
+            String json;
+            try (InputStream in = process.getInputStream()) {
+                json = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            }
+            int exit = process.waitFor();
+            if (exit != 0 || json == null || json.isBlank()) {
+                return null;
+            }
+
+            JsonNode root = objectMapper.readTree(json);
+            VideoMeta meta = new VideoMeta();
+
+            JsonNode formatNode = root.path("format");
+            JsonNode streamsNode = root.path("streams");
+
+            // 1. 时长
+            if (formatNode.hasNonNull("duration")) {
+                try {
+                    double seconds = Double.parseDouble(formatNode.get("duration").asText());
+                    meta.durationSec = (int) Math.round(seconds);
+                } catch (Exception ignored) {
+                }
+            }
+
+            // 2. 分辨率：优先找 video stream
+            if (streamsNode.isArray()) {
+                for (JsonNode stream : streamsNode) {
+                    if ("video".equalsIgnoreCase(stream.path("codec_type").asText())) {
+                        int width = stream.path("width").asInt(0);
+                        int height = stream.path("height").asInt(0);
+                        if (width > 0 && height > 0) {
+                            meta.resolution = width + "x" + height;
+                        }
+
+                        // stream 级 creation_time 优先
+                        Date streamCreation = parseCreationTimeFromTags(stream.path("tags"));
+                        if (streamCreation != null) {
+                            meta.shotTime = streamCreation;
+                        }
+
+                        // stream 级位置标签
+                        double[] streamLocation = parseLocationFromTags(stream.path("tags"));
+                        if (streamLocation != null) {
+                            meta.lat = streamLocation[0];
+                            meta.lng = streamLocation[1];
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // 3. format 级 creation_time 兜底
+            if (meta.shotTime == null) {
+                Date formatCreation = parseCreationTimeFromTags(formatNode.path("tags"));
+                if (formatCreation != null) {
+                    meta.shotTime = formatCreation;
+                }
+            }
+
+            // 4. format 级位置兜底
+            if (meta.lat == null || meta.lng == null) {
+                double[] formatLocation = parseLocationFromTags(formatNode.path("tags"));
+                if (formatLocation != null) {
+                    meta.lat = formatLocation[0];
+                    meta.lng = formatLocation[1];
+                }
+            }
+
+            if (meta.shotTime == null && meta.lat == null && meta.lng == null
+                    && meta.durationSec == null && meta.resolution == null) {
+                return null;
+            }
+            return meta;
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (tempFile != null) {
+                try {
+                    Files.deleteIfExists(tempFile);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+    private Date parseCreationTimeFromTags(JsonNode tagsNode) {
+        if (tagsNode == null || tagsNode.isMissingNode() || tagsNode.isNull()) {
+            return null;
+        }
+
+        String creationTime = textOrNull(tagsNode, "creation_time");
+        if (creationTime == null || creationTime.isBlank()) {
+            return null;
+        }
+
+        try {
+            return Date.from(Instant.parse(creationTime));
+        } catch (Exception ignored) {
+        }
+
+        try {
+            return Date.from(OffsetDateTime.parse(creationTime).toInstant());
+        } catch (Exception ignored) {
+        }
+
+        return null;
+    }
+
+    private double[] parseLocationFromTags(JsonNode tagsNode) {
+        if (tagsNode == null || tagsNode.isMissingNode() || tagsNode.isNull()) {
+            return null;
+        }
+
+        String raw = firstNonBlank(
+                textOrNull(tagsNode, "com.apple.quicktime.location.ISO6709"),
+                textOrNull(tagsNode, "location"),
+                textOrNull(tagsNode, "location-eng")
+        );
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+
+        return parseIso6709(raw);
+    }
+
+    private String textOrNull(JsonNode node, String field) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        JsonNode child = node.get(field);
+        if (child == null || child.isNull()) {
+            return null;
+        }
+        String text = child.asText();
+        return text == null || text.isBlank() ? null : text.trim();
+    }
+
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 解析类似：
+     * +39.0298+125.7540/
+     * +22.5431+114.0579+015.000/
+     */
+    private double[] parseIso6709(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String s = raw.trim();
+        if (s.endsWith("/")) {
+            s = s.substring(0, s.length() - 1);
+        }
+
+        // 找第二个符号位
+        int secondSign = -1;
+        for (int i = 1; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '+' || c == '-') {
+                secondSign = i;
+                break;
+            }
+        }
+        if (secondSign < 0) {
+            return null;
+        }
+
+        try {
+            String latStr = s.substring(0, secondSign);
+            String remain = s.substring(secondSign);
+
+            int thirdSign = -1;
+            for (int i = 1; i < remain.length(); i++) {
+                char c = remain.charAt(i);
+                if (c == '+' || c == '-') {
+                    thirdSign = i;
+                    break;
+                }
+            }
+
+            String lngStr = thirdSign < 0 ? remain : remain.substring(0, thirdSign);
+
+            double lat = Double.parseDouble(latStr);
+            double lng = Double.parseDouble(lngStr);
+
+            if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+                return null;
+            }
+            return new double[]{lat, lng};
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private String calculateHash(MultipartFile file) {
@@ -180,5 +474,13 @@ public class VideoServiceImpl implements VideoService {
             return url.substring(idx + 5);
         }
         return url;
+    }
+
+    private static class VideoMeta {
+        Date shotTime;
+        Double lat;
+        Double lng;
+        Integer durationSec;
+        String resolution;
     }
 }

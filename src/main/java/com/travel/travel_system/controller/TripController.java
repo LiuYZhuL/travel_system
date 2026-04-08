@@ -3,7 +3,7 @@ package com.travel.travel_system.controller;
 import com.travel.travel_system.model.Trip;
 import com.travel.travel_system.service.HeatmapService;
 import com.travel.travel_system.service.TripService;
-import com.travel.travel_system.service.pub.RedisService;
+import com.travel.travel_system.utils.ApiResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
@@ -13,14 +13,21 @@ import org.springframework.data.domain.Sort;
 import org.springframework.web.bind.annotation.*;
 
 import java.text.SimpleDateFormat;
-import java.util.*;
+import java.util.Collections;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.TimeZone;
 import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/v1/trips")
-public class TripController {
+public class TripController extends BaseController {
 
     private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+
     static {
         DATE_FORMAT.setTimeZone(TimeZone.getTimeZone("Asia/Shanghai"));
     }
@@ -32,7 +39,7 @@ public class TripController {
     private HeatmapService heatmapService;
 
     @PostMapping("")
-    public Map<String, Object> createTrip(@RequestBody Map<String, Object> request, HttpServletRequest httpRequest) {
+    public ApiResponse<?> createTrip(@RequestBody Map<String, Object> request, HttpServletRequest httpRequest) {
         try {
             Long userId = requireUserId(httpRequest);
             String title = asString(request.get("title"));
@@ -56,15 +63,15 @@ public class TripController {
     }
 
     @GetMapping("")
-    public Map<String, Object> getTripList(HttpServletRequest request,
-                                           @RequestParam(required = false, defaultValue = "1") Integer pageNo,
-                                           @RequestParam(required = false, defaultValue = "10") Integer pageSize,
-                                           @RequestParam(required = false) String keyword,
-                                           @RequestParam(required = false) String status,
-                                           @RequestParam(required = false) String startDate,
-                                           @RequestParam(required = false) String endDate,
-                                           @RequestParam(required = false, defaultValue = "createdAt") String sortBy,
-                                           @RequestParam(required = false, defaultValue = "DESC") String sortOrder) {
+    public ApiResponse<?> getTripList(HttpServletRequest request,
+                                      @RequestParam(required = false, defaultValue = "1") Integer pageNo,
+                                      @RequestParam(required = false, defaultValue = "10") Integer pageSize,
+                                      @RequestParam(required = false) String keyword,
+                                      @RequestParam(required = false) String status,
+                                      @RequestParam(required = false) String startDate,
+                                      @RequestParam(required = false) String endDate,
+                                      @RequestParam(required = false, defaultValue = "createdAt") String sortBy,
+                                      @RequestParam(required = false, defaultValue = "DESC") String sortOrder) {
         try {
             Long userId = requireUserId(request);
             Pageable pageable = PageRequest.of(
@@ -88,19 +95,14 @@ public class TripController {
                 item.put("privacyMode", trip.getPrivacyMode() != null ? trip.getPrivacyMode().name() : null);
                 return item;
             }).collect(Collectors.toList());
-            Map<String, Object> data = new LinkedHashMap<>();
-            data.put("items", items);
-            data.put("total", tripPage.getTotalElements());
-            data.put("pageNo", pageNo);
-            data.put("pageSize", pageSize);
-            return success(data);
+            return page(items, pageNo, pageSize, tripPage.getTotalElements());
         } catch (Exception e) {
             return error("SYSTEM_500", "获取行程列表失败：" + e.getMessage());
         }
     }
 
     @GetMapping("/{tripId}/detail")
-    public Map<String, Object> getTripDetail(@PathVariable Long tripId, HttpServletRequest request) {
+    public ApiResponse<?> getTripDetail(@PathVariable Long tripId, HttpServletRequest request) {
         try {
             return success(tripService.getTripDetail(requireUserId(request), tripId));
         } catch (Exception e) {
@@ -109,9 +111,9 @@ public class TripController {
     }
 
     @PatchMapping("/{tripId}")
-    public Map<String, Object> updateTrip(@PathVariable Long tripId,
-                                          @RequestBody Map<String, Object> request,
-                                          HttpServletRequest httpRequest) {
+    public ApiResponse<?> updateTrip(@PathVariable Long tripId,
+                                     @RequestBody Map<String, Object> request,
+                                     HttpServletRequest httpRequest) {
         try {
             Trip trip = tripService.updateTripBasic(
                     requireUserId(httpRequest),
@@ -131,7 +133,7 @@ public class TripController {
     }
 
     @PostMapping("/{tripId}/pause")
-    public Map<String, Object> pauseTrip(@PathVariable Long tripId, HttpServletRequest request) {
+    public ApiResponse<?> pauseTrip(@PathVariable Long tripId, HttpServletRequest request) {
         try {
             tripService.getUserTripOrThrow(requireUserId(request), tripId);
             Trip trip = tripService.pauseTrip(tripId);
@@ -142,7 +144,7 @@ public class TripController {
     }
 
     @PostMapping("/{tripId}/resume")
-    public Map<String, Object> resumeTrip(@PathVariable Long tripId, HttpServletRequest request) {
+    public ApiResponse<?> resumeTrip(@PathVariable Long tripId, HttpServletRequest request) {
         try {
             tripService.getUserTripOrThrow(requireUserId(request), tripId);
             Trip trip = tripService.resumeTrip(tripId);
@@ -153,7 +155,7 @@ public class TripController {
     }
 
     @PostMapping("/{tripId}/finish")
-    public Map<String, Object> finishTrip(@PathVariable Long tripId, HttpServletRequest request) {
+    public ApiResponse<?> finishTrip(@PathVariable Long tripId, HttpServletRequest request) {
         try {
             tripService.getUserTripOrThrow(requireUserId(request), tripId);
             Trip trip = tripService.finishTrip(tripId);
@@ -168,7 +170,7 @@ public class TripController {
     }
 
     @DeleteMapping("/{tripId}")
-    public Map<String, Object> deleteTrip(@PathVariable Long tripId, HttpServletRequest request) {
+    public ApiResponse<?> deleteTrip(@PathVariable Long tripId, HttpServletRequest request) {
         try {
             tripService.getUserTripOrThrow(requireUserId(request), tripId);
             tripService.deleteTrip(tripId);
@@ -179,7 +181,7 @@ public class TripController {
     }
 
     @GetMapping("/{tripId}/map")
-    public Map<String, Object> getTripMap(@PathVariable Long tripId, HttpServletRequest request) {
+    public ApiResponse<?> getTripMap(@PathVariable Long tripId, HttpServletRequest request) {
         try {
             return success(tripService.getTripMap(requireUserId(request), tripId));
         } catch (Exception e) {
@@ -188,9 +190,9 @@ public class TripController {
     }
 
     @GetMapping("/{tripId}/heatmap")
-    public Map<String, Object> getTripHeatmap(@PathVariable Long tripId,
-                                              HttpServletRequest request,
-                                              @RequestParam(required = false) Integer gridMeters) {
+    public ApiResponse<?> getTripHeatmap(@PathVariable Long tripId,
+                                         HttpServletRequest request,
+                                         @RequestParam(required = false) Integer gridMeters) {
         try {
             Long userId = requireUserId(request);
             tripService.getUserTripOrThrow(userId, tripId);
@@ -201,7 +203,7 @@ public class TripController {
     }
 
     @GetMapping("/{tripId}/places")
-    public Map<String, Object> getTripPlaces(@PathVariable Long tripId, HttpServletRequest request) {
+    public ApiResponse<?> getTripPlaces(@PathVariable Long tripId, HttpServletRequest request) {
         try {
             return success(tripService.getTripPlaces(requireUserId(request), tripId));
         } catch (Exception e) {
@@ -210,10 +212,10 @@ public class TripController {
     }
 
     @GetMapping("/{tripId}/story-blocks")
-    public Map<String, Object> getTripStoryBlocks(@PathVariable Long tripId,
-                                                  HttpServletRequest request,
-                                                  @RequestParam(required = false, defaultValue = "1") Integer pageNo,
-                                                  @RequestParam(required = false, defaultValue = "20") Integer pageSize) {
+    public ApiResponse<?> getTripStoryBlocks(@PathVariable Long tripId,
+                                             HttpServletRequest request,
+                                             @RequestParam(required = false, defaultValue = "1") Integer pageNo,
+                                             @RequestParam(required = false, defaultValue = "20") Integer pageSize) {
         try {
             return success(tripService.getTripStoryBlocks(requireUserId(request), tripId, pageNo, pageSize));
         } catch (Exception e) {
@@ -222,7 +224,7 @@ public class TripController {
     }
 
     @GetMapping("/{tripId}/statistics")
-    public Map<String, Object> getTripStatistics(@PathVariable Long tripId, HttpServletRequest request) {
+    public ApiResponse<?> getTripStatistics(@PathVariable Long tripId, HttpServletRequest request) {
         try {
             Long userId = requireUserId(request);
             tripService.getUserTripOrThrow(userId, tripId);
@@ -233,7 +235,7 @@ public class TripController {
     }
 
     @GetMapping("/{tripId}/story")
-    public Map<String, Object> getTripStory(@PathVariable Long tripId, HttpServletRequest request) {
+    public ApiResponse<?> getTripStory(@PathVariable Long tripId, HttpServletRequest request) {
         try {
             Long userId = requireUserId(request);
             tripService.getUserTripOrThrow(userId, tripId);
@@ -244,7 +246,7 @@ public class TripController {
     }
 
     @GetMapping("/{tripId}/ai-summary")
-    public Map<String, Object> getTripAiSummary(@PathVariable Long tripId, HttpServletRequest request) {
+    public ApiResponse<?> getTripAiSummary(@PathVariable Long tripId, HttpServletRequest request) {
         try {
             return success(tripService.getTripAiSummary(requireUserId(request), tripId, false));
         } catch (Exception e) {
@@ -253,7 +255,7 @@ public class TripController {
     }
 
     @PostMapping("/{tripId}/ai-summary/regenerate")
-    public Map<String, Object> regenerateTripAiSummary(@PathVariable Long tripId, HttpServletRequest request) {
+    public ApiResponse<?> regenerateTripAiSummary(@PathVariable Long tripId, HttpServletRequest request) {
         try {
             return success(tripService.getTripAiSummary(requireUserId(request), tripId, true));
         } catch (Exception e) {
@@ -262,7 +264,7 @@ public class TripController {
     }
 
     @PostMapping("/{tripId}/story-blocks/rebuild")
-    public Map<String, Object> rebuildTripStoryBlocks(@PathVariable Long tripId, HttpServletRequest request) {
+    public ApiResponse<?> rebuildTripStoryBlocks(@PathVariable Long tripId, HttpServletRequest request) {
         try {
             return success(tripService.rebuildTripStoryBlocks(requireUserId(request), tripId));
         } catch (Exception e) {
@@ -271,7 +273,7 @@ public class TripController {
     }
 
     @GetMapping("/active")
-    public Map<String, Object> getActiveTrip(HttpServletRequest request) {
+    public ApiResponse<?> getActiveTrip(HttpServletRequest request) {
         try {
             return success(tripService.getActiveTrip(requireUserId(request)));
         } catch (Exception e) {
@@ -280,9 +282,9 @@ public class TripController {
     }
 
     @PostMapping("/{tripId}/track-points/batch")
-    public Map<String, Object> uploadTrackPoints(@PathVariable Long tripId,
-                                                 @RequestBody Map<String, Object> request,
-                                                 HttpServletRequest httpRequest) {
+    public ApiResponse<?> uploadTrackPoints(@PathVariable Long tripId,
+                                            @RequestBody Map<String, Object> request,
+                                            HttpServletRequest httpRequest) {
         try {
             Object pointsObj = request.get("points");
             if (!(pointsObj instanceof List<?> rawList)) {
@@ -298,7 +300,7 @@ public class TripController {
     }
 
     @GetMapping("/{tripId}/track-status")
-    public Map<String, Object> getTrackStatus(@PathVariable Long tripId, HttpServletRequest request) {
+    public ApiResponse<?> getTrackStatus(@PathVariable Long tripId, HttpServletRequest request) {
         try {
             return success(tripService.getTrackStatus(requireUserId(request), tripId));
         } catch (Exception e) {
@@ -312,23 +314,6 @@ public class TripController {
             throw new RuntimeException("用户不存在或未授权");
         }
         return userId;
-    }
-
-    private Map<String, Object> success(Object data) {
-        Map<String, Object> response = new LinkedHashMap<>();
-        response.put("code", "0");
-        response.put("message", "success");
-        response.put("data", data);
-        response.put("requestId", UUID.randomUUID().toString());
-        return response;
-    }
-
-    private Map<String, Object> error(String code, String message) {
-        Map<String, Object> response = new LinkedHashMap<>();
-        response.put("code", code);
-        response.put("message", message);
-        response.put("requestId", UUID.randomUUID().toString());
-        return response;
     }
 
     private String asString(Object value) {

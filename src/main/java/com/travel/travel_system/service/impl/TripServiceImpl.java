@@ -59,6 +59,8 @@ public class TripServiceImpl implements TripService {
     private TrackPointService trackPointService;
     @Autowired
     private TripRouteSnapshotService tripRouteSnapshotService;
+    @Autowired
+    private TripSegmentRepository tripSegmentRepository;
 
     private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
     private static final SimpleDateFormat DATE_ONLY_FORMAT = new SimpleDateFormat("yyyy-MM-dd");
@@ -68,6 +70,7 @@ public class TripServiceImpl implements TripService {
         DATE_FORMAT.setTimeZone(tz);
         DATE_ONLY_FORMAT.setTimeZone(tz);
     }
+
 
     @Override
     @Transactional
@@ -89,7 +92,10 @@ public class TripServiceImpl implements TripService {
         trip.setVideoCount(0);
         trip.setCreatedAt(new Date());
         trip.setUpdatedAt(new Date());
-        return tripRepository.save(trip);
+
+        Trip saved = tripRepository.save(trip);
+        openFirstSegmentIfAbsent(saved);
+        return saved;
     }
 
     @Override
@@ -187,6 +193,7 @@ public class TripServiceImpl implements TripService {
     public void deleteTrip(Long tripId) {
         Trip trip = tripRepository.findById(tripId)
                 .orElseThrow(() -> new RuntimeException("行程不存在，tripId: " + tripId));
+
         trackPointRepository.deleteByTripId(tripId);
         photoRepository.deleteByTripId(tripId);
         videoRepository.deleteByTripId(tripId);
@@ -196,6 +203,9 @@ public class TripServiceImpl implements TripService {
         storyBlockRepository.deleteByTripId(tripId);
         tripAiSummaryRepository.deleteByTripId(tripId);
         tripBBoxRepository.deleteByTripId(tripId);
+
+        tripSegmentRepository.deleteByTripId(tripId);
+
         tripRepository.delete(trip);
     }
 
@@ -207,12 +217,15 @@ public class TripServiceImpl implements TripService {
         if (trip.getStatus() != TripStatus.ACTIVE && trip.getStatus() != TripStatus.PAUSED) {
             throw new RuntimeException("行程状态不允许结束，当前状态：" + trip.getStatus());
         }
-        trip.setEndTime(new Date());
+
+        long nowTs = System.currentTimeMillis();
+        trip.setEndTime(new Date(nowTs));
         trip.setStatus(TripStatus.PROCESSING);
         trip.setUpdatedAt(new Date());
+
         Trip saved = tripRepository.save(trip);
 
-        // 只投递后台收口任务，立即返回
+        closeOpenSegment(tripId, nowTs, "FINISH");
         finalizeTripAsync(tripId);
 
         return saved;
@@ -224,15 +237,25 @@ public class TripServiceImpl implements TripService {
         } catch (Exception e) {
             log.error("[TRIP_FINALIZE_ASYNC] tripId={} failed: {}", tripId, e.getMessage(), e);
 
-            // 如果你后面有 FAILED 状态，建议这里改成 FAILED
             tripRepository.findById(tripId).ifPresent(trip -> {
                 if (trip.getStatus() == TripStatus.PROCESSING) {
+                    trip.setStatus(TripStatus.FAILED);
                     trip.setUpdatedAt(new Date());
                     tripRepository.save(trip);
                 }
             });
         }
     }
+
+    @Async
+    public void refreshLatestSnapshotAsync(Long tripId) {
+        try {
+            tripRouteSnapshotService.saveLatestSnapshot(tripId);
+        } catch (Exception e) {
+            log.warn("[TRIP_ROUTE_SNAPSHOT] async refresh failed tripId={}: {}", tripId, e.getMessage(), e);
+        }
+    }
+
 
     @Override
     @Transactional
@@ -242,9 +265,14 @@ public class TripServiceImpl implements TripService {
         if (trip.getStatus() != TripStatus.ACTIVE) {
             throw new RuntimeException("TRIP_409 只有进行中的行程才可暂停");
         }
+
+        long nowTs = System.currentTimeMillis();
         trip.setStatus(TripStatus.PAUSED);
         trip.setUpdatedAt(new Date());
-        return tripRepository.save(trip);
+        Trip saved = tripRepository.save(trip);
+
+        closeOpenSegment(tripId, nowTs, "PAUSE");
+        return saved;
     }
 
     @Override
@@ -255,9 +283,21 @@ public class TripServiceImpl implements TripService {
         if (trip.getStatus() != TripStatus.PAUSED) {
             throw new RuntimeException("TRIP_409 只有暂停状态的行程才可恢复");
         }
+
+        long nowTs = System.currentTimeMillis();
         trip.setStatus(TripStatus.ACTIVE);
         trip.setUpdatedAt(new Date());
-        return tripRepository.save(trip);
+        Trip saved = tripRepository.save(trip);
+
+        TripSegment openSegment = tripSegmentRepository
+                .findTopByTripIdAndIsClosedFalseOrderBySegmentNoDesc(tripId)
+                .orElse(null);
+
+        if (openSegment == null) {
+            openNextSegment(tripId, nowTs, "RESUME");
+        }
+
+        return saved;
     }
 
     @Override
@@ -266,16 +306,31 @@ public class TripServiceImpl implements TripService {
         Trip trip = tripRepository.findById(tripId)
                 .orElseThrow(() -> new RuntimeException("行程不存在，tripId: " + tripId));
 
-        List<TrackPoint> trackPoints = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
-        if (!trackPoints.isEmpty()) {
-            trip.setDistanceM(calculateTotalDistance(trackPoints));
-            if (trackPoints.size() >= 2) {
-                long duration = (trackPoints.get(trackPoints.size() - 1).getTs() - trackPoints.get(0).getTs()) / 1000L;
+        // 只用 ACTIVE 段里可绘制的点做最终结算
+        List<TrackPoint> effectiveTrackPoints = getEffectiveTrackPoints(tripId);
+
+        if (!effectiveTrackPoints.isEmpty()) {
+            trip.setDistanceM(calculateTotalDistance(effectiveTrackPoints));
+
+            if (effectiveTrackPoints.size() >= 2) {
+                long duration = (effectiveTrackPoints.get(effectiveTrackPoints.size() - 1).getTs()
+                        - effectiveTrackPoints.get(0).getTs()) / 1000L;
                 trip.setDurationSec(Math.max(duration, 0L));
+            } else {
+                trip.setDurationSec(0L);
             }
-            calculateAndSaveBBox(tripId, trackPoints);
+
+            calculateAndSaveBBox(tripId, effectiveTrackPoints);
+
+            // 路径匹配也应该只基于有效轨迹点
             performMapMatching(tripId);
+
+            // 路线快照生成依赖 TrackPointServiceImpl；
+            // 你那边也要保证 matchTrajectory/processTrackRendering 只使用 renderEligible=true 的点
             tripRouteSnapshotService.finalizeFinishedTrip(tripId);
+        } else {
+            trip.setDistanceM(0L);
+            trip.setDurationSec(0L);
         }
 
         trip.setPhotoCount((int) photoRepository.countByTripId(tripId));
@@ -361,6 +416,40 @@ public class TripServiceImpl implements TripService {
         TripMapVO.BBoxVO bbox = buildBBox(tripId, trackPoints, displayCoordType);
         GeoPointVO center = buildCenter(bbox, displayCoordType);
 
+        // 1) 先尝试从 snapshot 秒开
+        try {
+            Optional<TripRouteSnapshotPayload> payloadOpt =
+                    tripRouteSnapshotService.loadSnapshotPayloadAndWarmRedis(tripId);
+
+            if (payloadOpt.isPresent()) {
+                TripRouteSnapshotPayload payload = payloadOpt.get();
+
+                TrackPolylineVO rawPolyline = emptyPolyline();
+                TrackPolylineVO matchedPolyline = payload.getMatchedPolyline() != null
+                        ? payload.getMatchedPolyline()
+                        : emptyPolyline();
+                TrackPolylineVO reconstructedPolyline = payload.getReconstructedPolyline() != null
+                        ? payload.getReconstructedPolyline()
+                        : emptyPolyline();
+
+                // 后台异步刷新 latest snapshot，给路网读取/重算留缓冲时间
+                refreshLatestSnapshotAsync(tripId);
+
+                return TripMapVO.builder()
+                        .center(center)
+                        .zoom(resolveZoom(bbox))
+                        .bbox(bbox)
+                        .rawPolyline(rawPolyline)
+                        .matchedPolyline(matchedPolyline)
+                        .reconstructedPolyline(reconstructedPolyline)
+                        .markers(buildMapMarkers(tripId, displayCoordType, trackPoints))
+                        .build();
+            }
+        } catch (Exception e) {
+            log.warn("[TRIP_ROUTE_SNAPSHOT] pre-read snapshot failed tripId={}: {}", tripId, e.getMessage(), e);
+        }
+
+        // 2) snapshot 没有，再走实时处理
         TrackPolylineVO rawPolyline = emptyPolyline();
         TrackPolylineVO matchedPolyline = emptyPolyline();
         TrackPolylineVO reconstructedPolyline = emptyPolyline();
@@ -373,27 +462,8 @@ public class TripServiceImpl implements TripService {
             matchedPolyline = processed.getOrDefault("matchedPolyline", emptyPolyline());
             reconstructedPolyline = processed.getOrDefault("reconstructedPolyline", emptyPolyline());
 
-            boolean routeMissing = isEmptyPolyline(matchedPolyline) && isEmptyPolyline(reconstructedPolyline);
-
-            if (trip.getStatus() == TripStatus.FINISHED && routeMissing) {
-                try {
-                    Optional<TripRouteSnapshotPayload> payloadOpt =
-                            tripRouteSnapshotService.loadSnapshotPayloadAndWarmRedis(tripId);
-
-                    if (payloadOpt.isPresent()) {
-                        TripRouteSnapshotPayload payload = payloadOpt.get();
-
-                        if (payload.getMatchedPolyline() != null) {
-                            matchedPolyline = payload.getMatchedPolyline();
-                        }
-                        if (payload.getReconstructedPolyline() != null) {
-                            reconstructedPolyline = payload.getReconstructedPolyline();
-                        }
-                    }
-                } catch (Exception e) {
-                    log.warn("[TRIP_ROUTE_SNAPSHOT] fallback load failed tripId={}: {}", tripId, e.getMessage(), e);
-                }
-            }
+            // 实时算出来以后，也异步存一份 latest snapshot
+            refreshLatestSnapshotAsync(tripId);
         }
 
         return TripMapVO.builder()
@@ -460,8 +530,14 @@ public class TripServiceImpl implements TripService {
         if (activeTrips == null || activeTrips.isEmpty()) {
             return null;
         }
-        activeTrips.sort(Comparator.comparing(Trip::getStartTime, Comparator.nullsLast(Date::compareTo)).reversed());
+
+        activeTrips.sort(Comparator.comparing(
+                Trip::getStartTime,
+                Comparator.nullsLast(Date::compareTo)
+        ).reversed());
+
         Trip trip = activeTrips.get(0);
+
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("tripId", trip.getId());
         data.put("title", trip.getTitle());
@@ -477,6 +553,29 @@ public class TripServiceImpl implements TripService {
         if (points == null || points.isEmpty()) {
             return 0;
         }
+
+        if (trip.getStatus() == TripStatus.FINISHED || trip.getStatus() == TripStatus.PROCESSING) {
+            throw new RuntimeException("行程已结束或正在归档，不能继续写入轨迹点");
+        }
+
+        // P0 修复：PAUSED 期间不再写入主轨迹表，避免污染 segment / media 归属 / route 计算
+        if (trip.getStatus() == TripStatus.PAUSED) {
+            return 0;
+        }
+
+        TripSegment openSegment = tripSegmentRepository
+                .findTopByTripIdAndIsClosedFalseOrderBySegmentNoDesc(tripId)
+                .orElse(null);
+
+        if (openSegment == null) {
+            Long batchStartTs = resolveBatchStartTs(points);
+            openSegment = openNextSegment(
+                    tripId,
+                    batchStartTs != null ? batchStartTs : System.currentTimeMillis(),
+                    "RESUME"
+            );
+        }
+
         List<TrackPoint> trackPoints = new ArrayList<>();
         for (Map<String, Object> pointMap : points) {
             Double lat = toDouble(pointMap.get("lat"));
@@ -485,6 +584,7 @@ public class TripServiceImpl implements TripService {
             if (lat == null || lng == null || ts == null) {
                 continue;
             }
+
             TrackPoint point = new TrackPoint();
             point.setUserId(trip.getUserId());
             point.setTripId(tripId);
@@ -496,14 +596,20 @@ public class TripServiceImpl implements TripService {
             point.setHeadingDeg(toFloat(pointMap.get("headingDeg")));
             point.setSource(TrackPointSource.WX_FG);
             point.setRawCoordType(parseCoordTypeOrDefault(pointMap.get("coordType"), CoordType.GCJ02));
+            point.setCreatedAt(new Date());
+
+            point.setSegmentId(openSegment.getId());
+            point.setRenderEligible(true);
+
             trackPoints.add(point);
         }
+
         if (!trackPoints.isEmpty()) {
             trackPointService.cacheTrackPoints(tripId, trackPoints);
         }
+
         return trackPoints.size();
     }
-
     @Override
     public Map<String, Object> getTrackStatus(Long userId, Long tripId) {
         Trip trip = getUserTripOrThrow(userId, tripId);
@@ -912,6 +1018,81 @@ public class TripServiceImpl implements TripService {
             points.add(item);
         }
         return points;
+    }
+    private List<TrackPoint> getEffectiveTrackPoints(Long tripId) {
+        List<TrackPoint> points = trackPointRepository.findByTripIdAndRenderEligibleOrderByTsAsc(tripId, true);
+        return points == null ? Collections.emptyList() : points;
+    }
+    private void openFirstSegmentIfAbsent(Trip trip) {
+        if (trip == null || trip.getId() == null) {
+            return;
+        }
+        if (tripSegmentRepository.findTopByTripIdOrderBySegmentNoDesc(trip.getId()).isPresent()) {
+            return;
+        }
+
+        TripSegment segment = new TripSegment();
+        segment.setTripId(trip.getId());
+        segment.setSegmentNo(1);
+        segment.setStartTs(trip.getStartTime() == null
+                ? System.currentTimeMillis()
+                : trip.getStartTime().getTime());
+        segment.setStartReason("TRIP_START");
+        segment.setIsClosed(false);
+        segment.setCreatedAt(new Date());
+        segment.setUpdatedAt(new Date());
+        tripSegmentRepository.save(segment);
+    }
+
+    private TripSegment openNextSegment(Long tripId, long startTs, String reason) {
+        TripSegment existingOpen = tripSegmentRepository
+                .findTopByTripIdAndIsClosedFalseOrderBySegmentNoDesc(tripId)
+                .orElse(null);
+        if (existingOpen != null) {
+            return existingOpen;
+        }
+
+        int nextNo = tripSegmentRepository.findTopByTripIdOrderBySegmentNoDesc(tripId)
+                .map(s -> s.getSegmentNo() + 1)
+                .orElse(1);
+
+        TripSegment segment = new TripSegment();
+        segment.setTripId(tripId);
+        segment.setSegmentNo(nextNo);
+        segment.setStartTs(startTs);
+        segment.setStartReason(reason);
+        segment.setIsClosed(false);
+        segment.setCreatedAt(new Date());
+        segment.setUpdatedAt(new Date());
+        return tripSegmentRepository.save(segment);
+    }
+
+    private void closeOpenSegment(Long tripId, long endTs, String reason) {
+        tripSegmentRepository.findTopByTripIdAndIsClosedFalseOrderBySegmentNoDesc(tripId)
+                .ifPresent(segment -> {
+                    segment.setEndTs(endTs);
+                    segment.setEndReason(reason);
+                    segment.setIsClosed(true);
+                    segment.setUpdatedAt(new Date());
+                    tripSegmentRepository.save(segment);
+                });
+    }
+
+    private Long resolveBatchStartTs(List<Map<String, Object>> points) {
+        Long minTs = null;
+        if (points == null) {
+            return null;
+        }
+        for (Map<String, Object> point : points) {
+            Long ts = toLong(point.get("ts"));
+            if (ts == null) {
+                continue;
+            }
+            if (minTs == null || ts < minTs) {
+                minTs = ts;
+            }
+        }
+        return minTs;
     }
 
     private TrackPolylineVO emptyPolyline() {

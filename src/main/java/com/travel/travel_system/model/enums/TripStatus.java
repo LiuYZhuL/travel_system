@@ -4,5 +4,6 @@ public enum TripStatus {
     ACTIVE,
     PAUSED,
     PROCESSING,
-    FINISHED
+    FINISHED,
+    FAILED
 }

@@ -28,7 +28,7 @@ import java.util.zip.GZIPOutputStream;
 public class TripRouteSnapshotServiceImpl implements TripRouteSnapshotService {
 
     private static final Logger log = LoggerFactory.getLogger(TripRouteSnapshotServiceImpl.class);
-    private static final long FINALIZE_LOCK_TTL_SECONDS = 10 * 60L;
+    private static final long SNAPSHOT_LOCK_TTL_SECONDS = 10 * 60L;
 
     @Autowired
     private TripRouteSnapshotRepository tripRouteSnapshotRepository;
@@ -50,27 +50,34 @@ public class TripRouteSnapshotServiceImpl implements TripRouteSnapshotService {
     @Override
     @Transactional
     public TripRouteSnapshot finalizeFinishedTrip(Long tripId) {
+        // 现在“结束收口”也只是在保存最新展示快照
+        return saveLatestSnapshot(tripId);
+    }
+
+    @Override
+    @Transactional
+    public TripRouteSnapshot saveLatestSnapshot(Long tripId) {
         if (tripId == null) {
             throw new RuntimeException("tripId 不能为空");
         }
 
-        String lockKey = "track_match:finalize:lock:" + tripId;
+        String lockKey = "track_match:snapshot:lock:" + tripId;
         String lockValue = UUID.randomUUID().toString();
-        if (!redisService.setIfAbsent(lockKey, lockValue, FINALIZE_LOCK_TTL_SECONDS)) {
-            throw new RuntimeException("路线快照收口正在进行中，tripId=" + tripId);
+        if (!redisService.setIfAbsent(lockKey, lockValue, SNAPSHOT_LOCK_TTL_SECONDS)) {
+            throw new RuntimeException("路线快照保存正在进行中，tripId=" + tripId);
         }
 
         try {
             trackPointService.recomputeTripMatchIfNeeded(tripId);
             TripRouteSnapshotPayload payload = trackPointService.buildRouteSnapshotPayload(tripId);
             if (payload.getMatchedResults() == null || payload.getMatchedResults().isEmpty()) {
-                throw new RuntimeException("最终路线快照为空，tripId=" + tripId);
+                throw new RuntimeException("最新路线快照为空，tripId=" + tripId);
             }
 
             byte[] jsonBytes = objectMapper.writeValueAsBytes(payload);
             byte[] gzipBytes = gzip(jsonBytes);
             String contentHash = sha256Hex(gzipBytes);
-            String objectName = buildObjectName(payload);
+            String objectName = buildLatestObjectName(payload);
 
             Optional<TripRouteSnapshot> existingOpt = tripRouteSnapshotRepository.findById(tripId);
             if (existingOpt.isPresent()) {
@@ -80,6 +87,12 @@ public class TripRouteSnapshotServiceImpl implements TripRouteSnapshotService {
                         && contentHash.equals(existing.getContentHash())
                         && existing.getOssObjectKey() != null
                         && !existing.getOssObjectKey().isBlank()) {
+                    // 指纹未变，不重新上传，只回灌缓存
+                    if (!"LATEST".equalsIgnoreCase(existing.getRouteStatus())) {
+                        existing.setRouteStatus("LATEST");
+                        existing.setUpdatedAt(new Date());
+                        tripRouteSnapshotRepository.save(existing);
+                    }
                     trackPointService.warmLatestCacheFromSnapshot(payload);
                     return existing;
                 }
@@ -90,7 +103,7 @@ public class TripRouteSnapshotServiceImpl implements TripRouteSnapshotService {
             TripRouteSnapshot snapshot = existingOpt.orElseGet(TripRouteSnapshot::new);
             Date now = new Date();
             snapshot.setTripId(tripId);
-            snapshot.setRouteStatus("FINAL");
+            snapshot.setRouteStatus("LATEST");
             snapshot.setAlgoVersion(payload.getAlgoVersion());
             snapshot.setFingerprint(payload.getFingerprint());
             snapshot.setPointCount(payload.getPointCount() == null ? 0 : payload.getPointCount());
@@ -100,18 +113,32 @@ public class TripRouteSnapshotServiceImpl implements TripRouteSnapshotService {
             snapshot.setOssObjectKey(ossUrl);
             snapshot.setOssEtag(null);
             snapshot.setContentHash(contentHash);
-            snapshot.setGeneratedAt(new Date(payload.getGeneratedAt() == null ? System.currentTimeMillis() : payload.getGeneratedAt()));
+            snapshot.setGeneratedAt(new Date(
+                    payload.getGeneratedAt() == null ? System.currentTimeMillis() : payload.getGeneratedAt()
+            ));
+
+            // 如果你的 entity 已经有这两个字段，可以顺手补上；没有就删掉这两行
+            // snapshot.setMediaPointCount(payload.getMediaPointCount() == null ? 0 : payload.getMediaPointCount());
+            // snapshot.setSegmentCount(payload.getSegmentCount() == null ? 0 : payload.getSegmentCount());
+
             if (snapshot.getCreatedAt() == null) {
                 snapshot.setCreatedAt(now);
             }
             snapshot.setUpdatedAt(now);
-            TripRouteSnapshot saved = tripRouteSnapshotRepository.save(snapshot);
 
+            TripRouteSnapshot saved = tripRouteSnapshotRepository.save(snapshot);
             trackPointService.warmLatestCacheFromSnapshot(payload);
             return saved;
         } catch (Exception e) {
-            log.error("[TRIP_ROUTE_SNAPSHOT] finalize failed tripId={}: {}", tripId, e.getMessage(), e);
-            throw new RuntimeException("行程路线快照收口失败: " + e.getMessage(), e);
+            log.error("[TRIP_ROUTE_SNAPSHOT] save latest failed tripId={}: {}", tripId, e.getMessage(), e);
+
+            tripRouteSnapshotRepository.findById(tripId).ifPresent(snapshot -> {
+                snapshot.setRouteStatus("FAILED");
+                snapshot.setUpdatedAt(new Date());
+                tripRouteSnapshotRepository.save(snapshot);
+            });
+
+            throw new RuntimeException("行程路线快照保存失败: " + e.getMessage(), e);
         } finally {
             releaseLockSafely(lockKey, lockValue);
         }
@@ -149,10 +176,10 @@ public class TripRouteSnapshotServiceImpl implements TripRouteSnapshotService {
         return payloadOpt;
     }
 
-    private String buildObjectName(TripRouteSnapshotPayload payload) {
+    private String buildLatestObjectName(TripRouteSnapshotPayload payload) {
         String algo = sanitize(payload.getAlgoVersion());
         String fp = sanitize(payload.getFingerprint());
-        return ossPrefix + "/" + payload.getTripId() + "/final/" + algo + "/" + fp + ".json.gz";
+        return ossPrefix + "/" + payload.getTripId() + "/latest/" + algo + "/" + fp + ".json.gz";
     }
 
     private String sanitize(String text) {
@@ -188,7 +215,7 @@ public class TripRouteSnapshotServiceImpl implements TripRouteSnapshotService {
                 redisService.deleteKey(lockKey);
             }
         } catch (Exception e) {
-            log.warn("[TRIP_ROUTE_SNAPSHOT] release finalize lock failed key={}: {}", lockKey, e.getMessage(), e);
+            log.warn("[TRIP_ROUTE_SNAPSHOT] release snapshot lock failed key={}: {}", lockKey, e.getMessage(), e);
         }
     }
 }
