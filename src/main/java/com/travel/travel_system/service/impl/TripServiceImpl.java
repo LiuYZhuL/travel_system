@@ -1,5 +1,6 @@
 package com.travel.travel_system.service.impl;
 
+import com.travel.travel_system.dto.TripRouteSnapshotPayload;
 import com.travel.travel_system.model.*;
 import com.travel.travel_system.dto.MapMatchingResult;
 import com.travel.travel_system.model.enums.BlockType;
@@ -8,16 +9,17 @@ import com.travel.travel_system.model.enums.PrivacyMode;
 import com.travel.travel_system.model.enums.TrackPointSource;
 import com.travel.travel_system.model.enums.TripStatus;
 import com.travel.travel_system.repository.*;
-import com.travel.travel_system.service.AiService;
-import com.travel.travel_system.service.TrackPointService;
-import com.travel.travel_system.service.TripService;
+import com.travel.travel_system.service.*;
 import com.travel.travel_system.vo.*;
 import com.travel.travel_system.vo.enums.*;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,6 +30,8 @@ import java.util.stream.Collectors;
 
 @Service
 public class TripServiceImpl implements TripService {
+
+    private static final Logger log = LoggerFactory.getLogger(TripServiceImpl.class);
 
     @Autowired
     private TripRepository tripRepository;
@@ -53,6 +57,8 @@ public class TripServiceImpl implements TripService {
     private AiService aiService;
     @Autowired
     private TrackPointService trackPointService;
+    @Autowired
+    private TripRouteSnapshotService tripRouteSnapshotService;
 
     private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
     private static final SimpleDateFormat DATE_ONLY_FORMAT = new SimpleDateFormat("yyyy-MM-dd");
@@ -205,11 +211,27 @@ public class TripServiceImpl implements TripService {
         trip.setStatus(TripStatus.PROCESSING);
         trip.setUpdatedAt(new Date());
         Trip saved = tripRepository.save(trip);
+
+        // 只投递后台收口任务，立即返回
+        finalizeTripAsync(tripId);
+
+        return saved;
+    }
+    @Async
+    public void finalizeTripAsync(Long tripId) {
         try {
             settleTrip(tripId);
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            log.error("[TRIP_FINALIZE_ASYNC] tripId={} failed: {}", tripId, e.getMessage(), e);
+
+            // 如果你后面有 FAILED 状态，建议这里改成 FAILED
+            tripRepository.findById(tripId).ifPresent(trip -> {
+                if (trip.getStatus() == TripStatus.PROCESSING) {
+                    trip.setUpdatedAt(new Date());
+                    tripRepository.save(trip);
+                }
+            });
         }
-        return saved;
     }
 
     @Override
@@ -252,16 +274,12 @@ public class TripServiceImpl implements TripService {
                 trip.setDurationSec(Math.max(duration, 0L));
             }
             calculateAndSaveBBox(tripId, trackPoints);
-            try {
-                performMapMatching(tripId);
-            } catch (Exception ignored) {
-            }
+            performMapMatching(tripId);
+            tripRouteSnapshotService.finalizeFinishedTrip(tripId);
         }
 
         trip.setPhotoCount((int) photoRepository.countByTripId(tripId));
         trip.setVideoCount((int) videoRepository.countByTripId(tripId));
-
-        generatePlaceSummaries(tripId);
 
         try {
             aiService.generateTripSummary(tripId);
@@ -336,20 +354,48 @@ public class TripServiceImpl implements TripService {
 
     @Override
     public TripMapVO getTripMap(Long userId, Long tripId) {
-        getUserTripOrThrow(userId, tripId);
+        Trip trip = getUserTripOrThrow(userId, tripId);
         List<TrackPoint> trackPoints = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
-        TripMapVO.BBoxVO bbox = buildBBox(tripId, trackPoints);
-        GeoPointVO center = buildCenter(bbox);
+
+        CoordTypeVO displayCoordType = resolveDisplayCoordType(trackPoints);
+        TripMapVO.BBoxVO bbox = buildBBox(tripId, trackPoints, displayCoordType);
+        GeoPointVO center = buildCenter(bbox, displayCoordType);
 
         TrackPolylineVO rawPolyline = emptyPolyline();
         TrackPolylineVO matchedPolyline = emptyPolyline();
         TrackPolylineVO reconstructedPolyline = emptyPolyline();
+
         if (!trackPoints.isEmpty()) {
-            Map<String, TrackPolylineVO> processed = trackPointService.processTrackPoints(tripId, toOriginalPointMaps(trackPoints));
+            Map<String, TrackPolylineVO> processed =
+                    trackPointService.processTrackPoints(tripId, toOriginalPointMaps(trackPoints));
+
             rawPolyline = processed.getOrDefault("rawPolyline", emptyPolyline());
             matchedPolyline = processed.getOrDefault("matchedPolyline", emptyPolyline());
             reconstructedPolyline = processed.getOrDefault("reconstructedPolyline", emptyPolyline());
+
+            boolean routeMissing = isEmptyPolyline(matchedPolyline) && isEmptyPolyline(reconstructedPolyline);
+
+            if (trip.getStatus() == TripStatus.FINISHED && routeMissing) {
+                try {
+                    Optional<TripRouteSnapshotPayload> payloadOpt =
+                            tripRouteSnapshotService.loadSnapshotPayloadAndWarmRedis(tripId);
+
+                    if (payloadOpt.isPresent()) {
+                        TripRouteSnapshotPayload payload = payloadOpt.get();
+
+                        if (payload.getMatchedPolyline() != null) {
+                            matchedPolyline = payload.getMatchedPolyline();
+                        }
+                        if (payload.getReconstructedPolyline() != null) {
+                            reconstructedPolyline = payload.getReconstructedPolyline();
+                        }
+                    }
+                } catch (Exception e) {
+                    log.warn("[TRIP_ROUTE_SNAPSHOT] fallback load failed tripId={}: {}", tripId, e.getMessage(), e);
+                }
+            }
         }
+
         return TripMapVO.builder()
                 .center(center)
                 .zoom(resolveZoom(bbox))
@@ -357,10 +403,9 @@ public class TripServiceImpl implements TripService {
                 .rawPolyline(rawPolyline)
                 .matchedPolyline(matchedPolyline)
                 .reconstructedPolyline(reconstructedPolyline)
-                .markers(buildMapMarkers(tripId))
+                .markers(buildMapMarkers(tripId, displayCoordType, trackPoints))
                 .build();
     }
-
     @Override
     public List<PlaceSummaryVO> getTripPlaces(Long userId, Long tripId) {
         getUserTripOrThrow(userId, tripId);
@@ -450,7 +495,7 @@ public class TripServiceImpl implements TripService {
             point.setSpeedMps(toFloat(pointMap.get("speedMps")));
             point.setHeadingDeg(toFloat(pointMap.get("headingDeg")));
             point.setSource(TrackPointSource.WX_FG);
-            point.setRawCoordType(CoordType.WGS84);
+            point.setRawCoordType(parseCoordTypeOrDefault(pointMap.get("coordType"), CoordType.GCJ02));
             trackPoints.add(point);
         }
         if (!trackPoints.isEmpty()) {
@@ -500,10 +545,11 @@ public class TripServiceImpl implements TripService {
         }
     }
 
-    private List<MapMarkerVO> buildMapMarkers(Long tripId) {
+    private List<MapMarkerVO> buildMapMarkers(Long tripId, CoordTypeVO displayCoordType, List<TrackPoint> trackPoints) {
         List<MapMarkerVO> markers = new ArrayList<>();
+        CoordType sourceCoordType = resolveSourceCoordType(trackPoints);
         for (PlaceSummary place : placeSummaryRepository.findByTripIdOrderByStartTimeAsc(tripId)) {
-            GeoPointVO point = buildGeoPoint(place.getCenterLatEnc(), place.getCenterLngEnc(), null, null);
+            GeoPointVO point = buildGeoPoint(place.getCenterLatEnc(), place.getCenterLngEnc(), null, null, sourceCoordType, displayCoordType);
             if (point == null) continue;
             markers.add(MapMarkerVO.builder()
                     .id("place-" + place.getId())
@@ -560,7 +606,7 @@ public class TripServiceImpl implements TripService {
                 .poiName(place.getPoiName())
                 .city(place.getCity())
                 .district(place.getDistrict())
-                .centerPoint(buildGeoPoint(place.getCenterLatEnc(), place.getCenterLngEnc(), null, null))
+                .centerPoint(buildGeoPoint(place.getCenterLatEnc(), place.getCenterLngEnc(), null, null, CoordType.GCJ02, CoordTypeVO.GCJ02))
                 .startTime(formatDateTime(place.getStartTime()))
                 .endTime(formatDateTime(place.getEndTime()))
                 .durationSec(normalizePlaceDuration(place.getDurationSec()))
@@ -629,7 +675,7 @@ public class TripServiceImpl implements TripService {
                 .caption(photo.getUserCaption())
                 .privacyMode(toPrivacyModeVO(photo.getPrivacyMode()))
                 .isCover(Boolean.TRUE.equals(photo.getIsCover()))
-                .point(buildGeoPoint(photo.getLatEnc(), photo.getLngEnc(), null, null))
+                .point(buildGeoPoint(photo.getLatEnc(), photo.getLngEnc(), null, null, CoordType.GCJ02, CoordTypeVO.GCJ02))
                 .build();
     }
 
@@ -646,7 +692,7 @@ public class TripServiceImpl implements TripService {
                 .resolution(video.getResolution())
                 .caption(video.getUserCaption())
                 .privacyMode(toPrivacyModeVO(video.getPrivacyMode()))
-                .point(buildGeoPoint(video.getLatEnc(), video.getLngEnc(), null, null))
+                .point(buildGeoPoint(video.getLatEnc(), video.getLngEnc(), null, null, CoordType.GCJ02, CoordTypeVO.GCJ02))
                 .build();
     }
 
@@ -680,7 +726,7 @@ public class TripServiceImpl implements TripService {
         return Arrays.stream(highlightsText.split("\\r?\\n")).map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toList());
     }
 
-    private long calculateTotalDistance(List<TrackPoint> trackPoints) {
+    long calculateTotalDistance(List<TrackPoint> trackPoints) {
         if (trackPoints.size() < 2) return 0L;
         double total = 0.0;
         for (int i = 1; i < trackPoints.size(); i++) {
@@ -698,7 +744,7 @@ public class TripServiceImpl implements TripService {
         return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
-    private void calculateAndSaveBBox(Long tripId, List<TrackPoint> trackPoints) {
+    public void calculateAndSaveBBox(Long tripId, List<TrackPoint> trackPoints) {
         if (trackPoints.isEmpty()) return;
         double minLat = Double.MAX_VALUE, maxLat = -Double.MAX_VALUE, minLng = Double.MAX_VALUE, maxLng = -Double.MAX_VALUE;
         for (TrackPoint point : trackPoints) {
@@ -714,32 +760,54 @@ public class TripServiceImpl implements TripService {
 
     private void generatePlaceSummaries(Long tripId) {
         List<TrackPoint> trackPoints = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
-        if (trackPoints.size() < 10) return;
+        if (trackPoints.size() < 10) {
+            return;
+        }
+
         placeSummaryRepository.deleteByTripId(tripId);
+
         int chunkSize = 10;
+        String fallbackCity = "未知";
+        String fallbackDistrict = "";
+
         for (int i = 0; i < trackPoints.size(); i += chunkSize) {
             List<TrackPoint> chunk = trackPoints.subList(i, Math.min(i + chunkSize, trackPoints.size()));
+
             PlaceSummary placeSummary = new PlaceSummary();
             placeSummary.setUserId(trackPoints.get(0).getUserId());
             placeSummary.setTripId(tripId);
-            double avgLat = 0.0, avgLng = 0.0;
+
+            double avgLat = 0.0;
+            double avgLng = 0.0;
             for (TrackPoint point : chunk) {
                 avgLat += bytesToDouble(point.getLatEnc());
                 avgLng += bytesToDouble(point.getLngEnc());
             }
-            avgLat /= chunk.size(); avgLng /= chunk.size();
+            avgLat /= chunk.size();
+            avgLng /= chunk.size();
+
             placeSummary.setCenterLatEnc(doubleToBytes(avgLat));
             placeSummary.setCenterLngEnc(doubleToBytes(avgLng));
+
             placeSummary.setStartTime(new Date(chunk.get(0).getTs()));
             placeSummary.setEndTime(new Date(chunk.get(chunk.size() - 1).getTs()));
-            placeSummary.setDurationSec((placeSummary.getEndTime().getTime() - placeSummary.getStartTime().getTime()) / 1000L);
+            placeSummary.setDurationSec(
+                    (placeSummary.getEndTime().getTime() - placeSummary.getStartTime().getTime()) / 1000L
+            );
+
             placeSummary.setPoiName("地点 " + (i / chunkSize + 1));
+
+            // 先强制兜底，避免 city 非空约束导致整个行程收口失败
+            placeSummary.setCity(fallbackCity);
+            placeSummary.setDistrict(fallbackDistrict);
+
             placeSummary.setPhotoCount(0);
             placeSummary.setVideoCount(0);
             placeSummary.setPrivacyLevel(PrivacyMode.PUBLIC);
             placeSummary.setGeneratedAt(new Date());
             placeSummary.setCreatedAt(new Date());
             placeSummary.setUpdatedAt(new Date());
+
             placeSummaryRepository.save(placeSummary);
         }
     }
@@ -763,30 +831,60 @@ public class TripServiceImpl implements TripService {
 
     private void performMapMatching(Long tripId) {
         try {
+            log.info("[TRIP_MAP_MATCH] tripId={} start", tripId);
             List<MapMatchingResult> matchedResults = trackPointService.matchTrajectory(tripId);
-        } catch (Exception ignored) {
+            logMatchedRouteSummary(tripId, matchedResults);
+            log.info("[TRIP_MAP_MATCH] tripId={} done resultCount={}", tripId, matchedResults == null ? 0 : matchedResults.size());
+        } catch (Exception e) {
+            log.warn("[TRIP_MAP_MATCH] tripId={} failed: {}", tripId, e.getMessage(), e);
         }
     }
 
-    private TripMapVO.BBoxVO buildBBox(Long tripId, List<TrackPoint> trackPoints) {
-        Optional<TripBBox> bboxOpt = tripBBoxRepository.findByTripId(tripId);
-        if (bboxOpt.isPresent()) {
-            TripBBox bbox = bboxOpt.get();
-            return TripMapVO.BBoxVO.builder().minLat((double) bbox.getMinLat()).minLng((double) bbox.getMinLng()).maxLat((double) bbox.getMaxLat()).maxLng((double) bbox.getMaxLng()).build();
+    private void logMatchedRouteSummary(Long tripId, List<MapMatchingResult> matchedResults) {
+        if (matchedResults == null || matchedResults.isEmpty()) {
+            log.info("[TRIP_MATCH_ROUTE] tripId={} route=EMPTY", tripId);
+            return;
         }
-        if (trackPoints == null || trackPoints.isEmpty()) return TripMapVO.BBoxVO.builder().minLat(0.0).minLng(0.0).maxLat(0.0).maxLng(0.0).build();
+        List<String> chain = new ArrayList<>();
+        Long lastRoadId = null;
+        for (MapMatchingResult result : matchedResults) {
+            if (result.getMatchedRoadId() == null) {
+                continue;
+            }
+            if (Objects.equals(lastRoadId, result.getMatchedRoadId())) {
+                continue;
+            }
+            chain.add("seg=" + result.getMatchedRoadId() + "/name=" + (result.getMatchedRoadName() == null ? "-" : result.getMatchedRoadName()));
+            lastRoadId = result.getMatchedRoadId();
+        }
+        log.info("[TRIP_MATCH_ROUTE] tripId={} uniqueRoadSegments={} chain={}", tripId, chain.size(), chain);
+    }
+
+    private boolean isEmptyPolyline(TrackPolylineVO polyline) {
+        return polyline == null || polyline.getPoints() == null || polyline.getPoints().isEmpty();
+    }
+
+    private TripMapVO.BBoxVO buildBBox(Long tripId, List<TrackPoint> trackPoints, CoordTypeVO displayCoordType) {
+        if (trackPoints == null || trackPoints.isEmpty()) {
+            return TripMapVO.BBoxVO.builder().minLat(0.0).minLng(0.0).maxLat(0.0).maxLng(0.0).build();
+        }
         double minLat = Double.MAX_VALUE, maxLat = -Double.MAX_VALUE, minLng = Double.MAX_VALUE, maxLng = -Double.MAX_VALUE;
         for (TrackPoint point : trackPoints) {
             double lat = bytesToDouble(point.getLatEnc()), lng = bytesToDouble(point.getLngEnc());
             if (!isValidCoordinate(lat, lng)) continue;
-            minLat = Math.min(minLat, lat); maxLat = Math.max(maxLat, lat); minLng = Math.min(minLng, lng); maxLng = Math.max(maxLng, lng);
+            double[] display = toDisplayCoord(lat, lng, point.getRawCoordType(), displayCoordType);
+            minLat = Math.min(minLat, display[0]); maxLat = Math.max(maxLat, display[0]); minLng = Math.min(minLng, display[1]); maxLng = Math.max(maxLng, display[1]);
         }
         if (minLat == Double.MAX_VALUE) minLat = maxLat = minLng = maxLng = 0.0;
         return TripMapVO.BBoxVO.builder().minLat(minLat).minLng(minLng).maxLat(maxLat).maxLng(maxLng).build();
     }
 
-    private GeoPointVO buildCenter(TripMapVO.BBoxVO bbox) {
-        return GeoPointVO.builder().lat((defaultDouble(bbox.getMinLat()) + defaultDouble(bbox.getMaxLat())) / 2.0).lng((defaultDouble(bbox.getMinLng()) + defaultDouble(bbox.getMaxLng())) / 2.0).coordType(CoordTypeVO.WGS84).build();
+    private GeoPointVO buildCenter(TripMapVO.BBoxVO bbox, CoordTypeVO displayCoordType) {
+        return GeoPointVO.builder()
+                .lat((defaultDouble(bbox.getMinLat()) + defaultDouble(bbox.getMaxLat())) / 2.0)
+                .lng((defaultDouble(bbox.getMinLng()) + defaultDouble(bbox.getMaxLng())) / 2.0)
+                .coordType(displayCoordType)
+                .build();
     }
 
     private Integer resolveZoom(TripMapVO.BBoxVO bbox) {
@@ -800,11 +898,11 @@ public class TripServiceImpl implements TripService {
             double lat = bytesToDouble(point.getLatEnc()), lng = bytesToDouble(point.getLngEnc());
             if (!isValidCoordinate(lat, lng)) continue;
             Map<String, Object> item = new LinkedHashMap<>();
-            item.put("lat", lat); 
-            item.put("lng", lng); 
-            item.put("ts", point.getTs()); 
-            item.put("accuracyM", point.getAccuracyM()); 
-            item.put("speedMps", point.getSpeedMps()); 
+            item.put("lat", lat);
+            item.put("lng", lng);
+            item.put("ts", point.getTs());
+            item.put("accuracyM", point.getAccuracyM());
+            item.put("speedMps", point.getSpeedMps());
             item.put("headingDeg", point.getHeadingDeg());
             if (point.getRawCoordType() != null) {
                 item.put("coordType", point.getRawCoordType().name());
@@ -820,10 +918,106 @@ public class TripServiceImpl implements TripService {
         return TrackPolylineVO.builder().points(Collections.emptyList()).distanceM(0L).simplified(Boolean.FALSE).build();
     }
 
-    private GeoPointVO buildGeoPoint(byte[] latEnc, byte[] lngEnc, Float accuracyM, Long ts) {
+    private GeoPointVO buildGeoPoint(byte[] latEnc, byte[] lngEnc, Float accuracyM, Long ts, CoordType sourceCoordType, CoordTypeVO displayCoordType) {
         double lat = bytesToDouble(latEnc), lng = bytesToDouble(lngEnc);
         if (!isValidCoordinate(lat, lng)) return null;
-        return GeoPointVO.builder().lat(lat).lng(lng).coordType(CoordTypeVO.WGS84).accuracyM(accuracyM != null ? accuracyM.doubleValue() : null).ts(ts).build();
+        double[] display = toDisplayCoord(lat, lng, sourceCoordType, displayCoordType);
+        return GeoPointVO.builder().lat(display[0]).lng(display[1]).coordType(displayCoordType).accuracyM(accuracyM != null ? accuracyM.doubleValue() : null).ts(ts).build();
+    }
+
+    private CoordTypeVO resolveDisplayCoordType(List<TrackPoint> trackPoints) {
+        // 前端地图统一按 GCJ02 显示；数据库内部可存 WGS84/GCJ02，但返回前端必须统一转成 GCJ02。
+        return CoordTypeVO.GCJ02;
+    }
+
+    private CoordType resolveSourceCoordType(List<TrackPoint> trackPoints) {
+        if (trackPoints == null || trackPoints.isEmpty()) {
+            return CoordType.WGS84;
+        }
+        for (TrackPoint point : trackPoints) {
+            if (point.getRawCoordType() != null) {
+                return point.getRawCoordType();
+            }
+        }
+        return CoordType.WGS84;
+    }
+
+    private CoordType parseCoordTypeOrDefault(Object input, CoordType defaultValue) {
+        if (input == null) {
+            return defaultValue;
+        }
+        try {
+            return CoordType.valueOf(String.valueOf(input).trim().toUpperCase(Locale.ROOT));
+        } catch (Exception e) {
+            return defaultValue;
+        }
+    }
+
+    private double[] toDisplayCoord(double lat, double lng, CoordType sourceCoordType, CoordTypeVO displayCoordType) {
+        if (displayCoordType == CoordTypeVO.GCJ02) {
+            if (sourceCoordType == CoordType.GCJ02) {
+                return new double[]{lat, lng};
+            }
+            return wgs84ToGcj02(lat, lng);
+        }
+        if (sourceCoordType == CoordType.GCJ02) {
+            return gcj02ToWgs84(lat, lng);
+        }
+        return new double[]{lat, lng};
+    }
+
+    private static final double PI = Math.PI;
+    private static final double A = 6378245.0;
+    private static final double EE = 0.00669342162296594323;
+
+    private double[] wgs84ToGcj02(double lat, double lon) {
+        if (outOfChina(lat, lon)) {
+            return new double[]{lat, lon};
+        }
+        double[] delta = delta(lat, lon);
+        return new double[]{lat + delta[0], lon + delta[1]};
+    }
+
+    private double[] gcj02ToWgs84(double lat, double lon) {
+        if (outOfChina(lat, lon)) {
+            return new double[]{lat, lon};
+        }
+        double[] delta = delta(lat, lon);
+        double mgLat = lat + delta[0];
+        double mgLon = lon + delta[1];
+        return new double[]{lat * 2 - mgLat, lon * 2 - mgLon};
+    }
+
+    private boolean outOfChina(double lat, double lon) {
+        return lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271;
+    }
+
+    private double[] delta(double lat, double lon) {
+        double dLat = transformLat(lon - 105.0, lat - 35.0);
+        double dLon = transformLon(lon - 105.0, lat - 35.0);
+        double radLat = lat / 180.0 * PI;
+        double magic = Math.sin(radLat);
+        magic = 1 - EE * magic * magic;
+        double sqrtMagic = Math.sqrt(magic);
+        dLat = (dLat * 180.0) / ((A * (1 - EE)) / (magic * sqrtMagic) * PI);
+        dLon = (dLon * 180.0) / (A / sqrtMagic * Math.cos(radLat) * PI);
+        return new double[]{dLat, dLon};
+    }
+
+    private double transformLat(double x, double y) {
+        double ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+        ret += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0;
+        ret += (20.0 * Math.sin(y * PI) + 40.0 * Math.sin(y / 3.0 * PI)) * 2.0 / 3.0;
+        ret += (160.0 * Math.sin(y / 12.0 * PI) + 320 * Math.sin(y * PI / 30.0)) * 2.0 / 3.0;
+        return ret;
+    }
+
+    private double transformLon(double x, double y) {
+        double ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+        ret += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0;
+        ret += (20.0 * Math.sin(x * PI) + 40.0 * Math.sin(x / 3.0 * PI)) * 2.0 / 3.0;
+        ret += (150.0 * Math.sin(x / 12.0 * PI) + 300.0 * Math.sin(x / 30.0 * PI)) * 2.0 / 3.0;
+        return ret;
     }
 
     private String formatDateTime(Date date) { return date == null ? null : DATE_FORMAT.format(date); }

@@ -35,21 +35,23 @@ public class AiApiClient {
      */
     public String generateContent(String prompt, double temperature) {
         try {
-            // 构建请求头
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.set("Authorization", "Bearer " + apiKey);
 
-            // 构建请求体
             Map<String, Object> requestBody = new HashMap<>();
             requestBody.put("model", model);
-            requestBody.put("prompt", prompt);
+
+            java.util.List<Map<String, String>> messages = new java.util.ArrayList<>();
+            Map<String, String> message = new HashMap<>();
+            message.put("role", "user");
+            message.put("content", prompt);
+            messages.add(message);
+
+            requestBody.put("messages", messages);
             requestBody.put("temperature", temperature);
             requestBody.put("max_tokens", 1000);
-            requestBody.put("n", 1);
-            requestBody.put("stop", null);
 
-            // 发送请求
             HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(requestBody, headers);
             ResponseEntity<String> responseEntity = restTemplate.exchange(
                     apiUrl,
@@ -58,11 +60,10 @@ public class AiApiClient {
                     String.class
             );
 
-            // 处理响应
             if (responseEntity.getStatusCode() == HttpStatus.OK) {
                 JSONObject responseJson = JSONObject.parseObject(responseEntity.getBody());
                 if (responseJson.containsKey("choices")) {
-                    return responseJson.getJSONArray("choices").getJSONObject(0).getString("text").trim();
+                    return responseJson.getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content").trim();
                 }
             }
 
@@ -70,7 +71,6 @@ public class AiApiClient {
             System.err.println("AI API调用失败: " + e.getMessage());
         }
 
-        // 失败时返回默认内容
         return "AI生成失败，请稍后重试";
     }
 

@@ -373,14 +373,6 @@ public class UserController {
     }
 
     /**
-     * 获取权限状态
-     */
-    @GetMapping("/permission-state")
-    public Map<String, Object> getPermissionState(HttpServletRequest request) {
-        return null;
-    }
-
-    /**
      * 获取当前用户热力图
      */
     @GetMapping("/heatmap")

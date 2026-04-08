@@ -3,6 +3,7 @@ package com.travel.travel_system.service.pub;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSException;
 import com.aliyun.oss.model.CannedAccessControlList;
+import com.aliyun.oss.model.OSSObject;
 import com.aliyun.oss.model.ObjectMetadata;
 import com.aliyun.oss.model.PutObjectRequest;
 import com.aliyun.oss.model.PutObjectResult;
@@ -17,10 +18,10 @@ import java.util.UUID;
 
 @Service
 public class OssService {
-    
+
     @Autowired
     private OSS ossClient;
-    
+
     @Value("${oss.bucket-name}")
     private String bucketName;
 
@@ -30,6 +31,7 @@ public class OssService {
     private String getDomain() {
         return "https://" + bucketName + "." + endpoint;
     }
+
     /**
      * 上传文件到OSS
      */
@@ -39,7 +41,6 @@ public class OssService {
             throw new IllegalArgumentException("文件名不能为空");
         }
 
-        // 安全提取扩展名
         String fileExtension = "";
         int lastDotIndex = originalFilename.lastIndexOf(".");
         if (lastDotIndex > 0) {
@@ -47,49 +48,78 @@ public class OssService {
         }
 
         String fileName = folder + "/" + UUID.randomUUID() + fileExtension;
-        
+
         try (InputStream inputStream = file.getInputStream()) {
             ObjectMetadata metadata = new ObjectMetadata();
             metadata.setContentType(file.getContentType());
-            
-            PutObjectRequest putObjectRequest = new PutObjectRequest(bucketName, fileName, inputStream, metadata);
-            PutObjectResult result = ossClient.putObject(putObjectRequest);
 
+            PutObjectRequest putObjectRequest = new PutObjectRequest(bucketName, fileName, inputStream, metadata);
+            ossClient.putObject(putObjectRequest);
             ossClient.setObjectAcl(bucketName, fileName, CannedAccessControlList.PublicRead);
-            
             return getDomain() + "/" + fileName;
         } catch (OSSException e) {
-            throw new RuntimeException("OSS上传失败: " + e.getMessage());
+            throw new RuntimeException("OSS上传失败: " + e.getMessage(), e);
         }
     }
-    
+
     /**
-     * 上传字节数组到OSS
+     * 上传字节数组到OSS，fileName 为完整 objectName。
      */
     public String uploadFile(byte[] bytes, String fileName) {
         try (InputStream inputStream = new java.io.ByteArrayInputStream(bytes)) {
             PutObjectRequest putObjectRequest = new PutObjectRequest(bucketName, fileName, inputStream);
             PutObjectResult result = ossClient.putObject(putObjectRequest);
-
             ossClient.setObjectAcl(bucketName, fileName, CannedAccessControlList.PublicRead);
-
             return getDomain() + "/" + fileName;
         } catch (Exception e) {
-            throw new RuntimeException("OSS上传失败: " + e.getMessage());
+            throw new RuntimeException("OSS上传失败: " + e.getMessage(), e);
         }
     }
-    
+
     /**
-     * 删除OSS文件
+     * 按 objectName 读取文件字节
      */
-    public void deleteFile(String objectName) {
-        try {
-            ossClient.deleteObject(bucketName, objectName);
-        } catch (OSSException e) {
-            throw new RuntimeException("OSS删除失败: " + e.getMessage());
+    public byte[] getFileBytes(String objectName) {
+        try (OSSObject object = ossClient.getObject(bucketName, objectName);
+             InputStream inputStream = object.getObjectContent()) {
+            return inputStream.readAllBytes();
+        } catch (Exception e) {
+            throw new RuntimeException("OSS读取失败: " + e.getMessage(), e);
         }
     }
-    
+
+    /**
+     * 按完整URL读取文件字节
+     */
+    public byte[] getFileBytesByUrl(String fileUrl) {
+        return getFileBytes(extractObjectName(fileUrl));
+    }
+
+    /**
+     * 从完整OSS URL中提取 objectName
+     */
+    public String extractObjectName(String fileUrl) {
+        if (fileUrl == null || fileUrl.isBlank()) {
+            throw new IllegalArgumentException("OSS文件URL不能为空");
+        }
+        String domainPrefix = getDomain() + "/";
+        if (fileUrl.startsWith(domainPrefix)) {
+            return fileUrl.substring(domainPrefix.length());
+        }
+        return fileUrl;
+    }
+
+    /**
+     * 删除OSS文件，入参可为 objectName 或完整URL
+     */
+    public void deleteFile(String objectNameOrUrl) {
+        try {
+            ossClient.deleteObject(bucketName, extractObjectName(objectNameOrUrl));
+        } catch (OSSException e) {
+            throw new RuntimeException("OSS删除失败: " + e.getMessage(), e);
+        }
+    }
+
     /**
      * 生成唯一的文件名
      */

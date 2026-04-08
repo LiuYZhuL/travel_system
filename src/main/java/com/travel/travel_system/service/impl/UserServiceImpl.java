@@ -64,28 +64,29 @@ public class UserServiceImpl implements UserService {
      */
     public User findOrCreateUser(String openId, String unionId, String nickname, String avatarUrl) {
         User user = findByOpenId(openId);
+        boolean isNewUser = false;
+        
         if (user == null) {
             user = register(openId, unionId);
+            isNewUser = true;
         } else if (unionId != null && !unionId.isEmpty() && user.getUnionId() == null) {
             user.setUnionId(unionId);
             user.setUpdatedAt(new Date());
         }
         
-        // 更新用户昵称：只有当传入值有效且（当前是默认值或与传入值不同）时才更新
-        if (nickname != null && !nickname.isEmpty()) {
-            String currentNickname = user.getNickname();
-            // 只有当前是默认昵称或与传入值不同时才更新
-            if ((USER_NICKNAME.equals(currentNickname) || !nickname.equals(currentNickname))) {
+        if (isNewUser) {
+            if (nickname != null && !nickname.isEmpty()) {
+                user.setNickname(nickname);
+            }
+            if (avatarUrl != null && !avatarUrl.isEmpty()) {
+                user.setAvatarUrl(avatarUrl);
+            }
+        } else {
+            if (nickname != null && !nickname.isEmpty() && USER_NICKNAME.equals(user.getNickname())) {
                 user.setNickname(nickname);
                 user.setUpdatedAt(new Date());
             }
-        }
-        
-        // 更新用户头像：只有当传入值有效且（当前是默认值或与传入值不同）时才更新
-        if (avatarUrl != null && !avatarUrl.isEmpty()) {
-            String currentAvatarUrl = user.getAvatarUrl();
-            // 只有当前是默认头像或与传入值不同时才更新
-            if ((USER_AVATAR_URL.equals(currentAvatarUrl) || !avatarUrl.equals(currentAvatarUrl))) {
+            if (avatarUrl != null && !avatarUrl.isEmpty() && USER_AVATAR_URL.equals(user.getAvatarUrl())) {
                 user.setAvatarUrl(avatarUrl);
                 user.setUpdatedAt(new Date());
             }

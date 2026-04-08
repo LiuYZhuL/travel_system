@@ -5,6 +5,8 @@ import com.travel.travel_system.dto.RoadNetwork;
 import com.travel.travel_system.dto.RoadNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
@@ -13,6 +15,7 @@ import static org.junit.jupiter.api.Assertions.*;
 public class MapMatchingAlgorithmTest {
 
     private RoadNetwork testRoadNetwork;
+    private Logger log = LoggerFactory.getLogger(MapMatchingAlgorithmTest.class);
 
     @BeforeEach
     void setUp() {
@@ -21,21 +24,21 @@ public class MapMatchingAlgorithmTest {
 
     @Test
     void testRoadNetworkCreation() {
-        System.out.println("========== 测试路网创建 ==========");
+        log.info("========== 测试路网创建 ==========");
         
         assertNotNull(testRoadNetwork);
         assertEquals(4, testRoadNetwork.getNodeCount());
         assertEquals(3, testRoadNetwork.getEdgeCount());
         
-        System.out.println("路网创建成功!");
-        System.out.println("节点数量: " + testRoadNetwork.getNodeCount());
-        System.out.println("路段数量: " + testRoadNetwork.getEdgeCount());
-        System.out.println("========== 路网创建测试通过 ==========\n");
+        log.info("路网创建成功!");
+        log.info("节点数量: " + testRoadNetwork.getNodeCount());
+        log.info("路段数量: " + testRoadNetwork.getEdgeCount());
+        log.info("========== 路网创建测试通过 ==========\n");
     }
 
     @Test
     void testCandidateRoadRetrieval() {
-        System.out.println("========== 测试候选路段检索 ==========");
+        log.info("========== 测试候选路段检索 ==========");
         
         double testLat = 30.2742;
         double testLon = 120.1552;
@@ -43,25 +46,25 @@ public class MapMatchingAlgorithmTest {
         
         List<RoadEdge> candidateRoads = testRoadNetwork.findNearbyEdges(testLat, testLon, searchRadius);
         
-        System.out.println("检索点: (" + testLat + ", " + testLon + ")");
-        System.out.println("检索半径: " + searchRadius + " 米");
-        System.out.println("找到候选路段数量: " + candidateRoads.size());
+        log.info("检索点: (" + testLat + ", " + testLon + ")");
+        log.info("检索半径: " + searchRadius + " 米");
+        log.info("找到候选路段数量: " + candidateRoads.size());
         
         assertFalse(candidateRoads.isEmpty(), "应该找到至少一条候选路段");
         
         for (int i = 0; i < candidateRoads.size(); i++) {
             RoadEdge road = candidateRoads.get(i);
-            System.out.println("  候选路段 " + (i + 1) + 
+            log.info("  候选路段 " + (i + 1) + 
                              ": ID=" + road.getId() + 
                              ", 名称=" + road.getName());
         }
         
-        System.out.println("========== 候选路段检索测试通过 ==========\n");
+        log.info("========== 候选路段检索测试通过 ==========\n");
     }
 
     @Test
     void testRouteDistanceCalculation() {
-        System.out.println("========== 测试路径距离计算 ==========");
+        log.info("========== 测试路径距离计算 ==========");
         
         RoadEdge edge1 = testRoadNetwork.getEdge(1);
         RoadEdge edge2 = testRoadNetwork.getEdge(2);
@@ -71,18 +74,18 @@ public class MapMatchingAlgorithmTest {
         
         double distance = testRoadNetwork.calculateRouteDistance(edge1, edge2);
         
-        System.out.println("路段1: " + edge1.getName());
-        System.out.println("路段2: " + edge2.getName());
-        System.out.println("计算距离: " + String.format("%.2f", distance) + " 米");
+        log.info("路段1: " + edge1.getName());
+        log.info("路段2: " + edge2.getName());
+        log.info("计算距离: " + String.format("%.2f", distance) + " 米");
         
         assertTrue(distance > 0, "距离应该大于0");
         
-        System.out.println("========== 路径距离计算测试通过 ==========\n");
+        log.info("========== 路径距离计算测试通过 ==========\n");
     }
 
     @Test
     void testDistanceToRoadCalculation() {
-        System.out.println("========== 测试点到路段距离计算 ==========");
+        log.info("========== 测试点到路段距离计算 ==========");
         
         RoadEdge testEdge = testRoadNetwork.getEdge(1);
         assertNotNull(testEdge);
@@ -92,18 +95,18 @@ public class MapMatchingAlgorithmTest {
         
         double distance = calculateDistanceToRoad(testLat, testLon, testEdge);
         
-        System.out.println("测试点: (" + testLat + ", " + testLon + ")");
-        System.out.println("目标路段: " + testEdge.getName());
-        System.out.println("计算距离: " + String.format("%.2f", distance) + " 米");
+        log.info("测试点: (" + testLat + ", " + testLon + ")");
+        log.info("目标路段: " + testEdge.getName());
+        log.info("计算距离: " + String.format("%.2f", distance) + " 米");
         
         assertTrue(distance >= 0, "距离不能为负数");
         
-        System.out.println("========== 点到路段距离计算测试通过 ==========\n");
+        log.info("========== 点到路段距离计算测试通过 ==========\n");
     }
 
     @Test
     void testProjectionCalculation() {
-        System.out.println("========== 测试投影点计算 ==========");
+        log.info("========== 测试投影点计算 ==========");
         
         RoadEdge testEdge = testRoadNetwork.getEdge(1);
         assertNotNull(testEdge);
@@ -113,13 +116,13 @@ public class MapMatchingAlgorithmTest {
         
         double[] projection = projectPointToRoad(testLat, testLon, testEdge);
         
-        System.out.println("原始点: (" + testLat + ", " + testLon + ")");
-        System.out.println("投影点: (" + projection[0] + ", " + projection[1] + ")");
+        log.info("原始点: (" + testLat + ", " + testLon + ")");
+        log.info("投影点: (" + projection[0] + ", " + projection[1] + ")");
         
         assertNotNull(projection);
         assertEquals(2, projection.length);
         
-        System.out.println("========== 投影点计算测试通过 ==========\n");
+        log.info("========== 投影点计算测试通过 ==========\n");
     }
 
     private RoadNetwork createSimpleTestRoadNetwork() {

@@ -3,6 +3,7 @@ package com.travel.travel_system.service.impl;
 import com.travel.travel_system.algorithm.model.RoadRestriction;
 import com.travel.travel_system.dto.MapMatchingResult;
 import com.travel.travel_system.dto.Projection;
+import com.travel.travel_system.dto.TripRouteSnapshotPayload;
 import com.travel.travel_system.model.TrackPoint;
 import com.travel.travel_system.model.enums.CoordType;
 import com.travel.travel_system.repository.TrackPointRepository;
@@ -1380,14 +1381,12 @@ public class TrackPointServiceImpl implements TrackPointService {
         if (tripId == null) {
             return false;
         }
-
         String lockKey = lockKey(tripId);
         String lockValue = UUID.randomUUID().toString();
         if (!redisService.setIfAbsent(lockKey, lockValue, MATCH_LOCK_TTL_SECONDS)) {
             log.debug("[TRACK_MATCH_RECOMPUTE] skip locked tripId={}", tripId);
             return false;
         }
-
         try {
             List<TrackPoint> before = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
             if (before == null || before.isEmpty()) {
@@ -1395,30 +1394,22 @@ public class TrackPointServiceImpl implements TrackPointService {
                 redisService.deleteKey(latestKey(tripId));
                 redisService.deleteKey(fingerprintKey(tripId));
                 redisService.deleteKey(dirtyKey(tripId));
-                log.warn("[TRACK_MATCH_RECOMPUTE] empty trip, clear cache tripId={}", tripId);
                 return false;
             }
-
             String startFingerprint = buildFingerprint(tripId, before);
             String cachedFingerprint = redisService.getString(fingerprintKey(tripId));
             boolean dirty = redisService.hasKey(dirtyKey(tripId));
             if (!dirty && Objects.equals(startFingerprint, cachedFingerprint)) {
-                log.debug("[TRACK_MATCH_RECOMPUTE] skip up-to-date tripId={} fingerprint={}", tripId, startFingerprint);
                 return false;
             }
-
-            log.warn("[TRACK_MATCH_RECOMPUTE] start tripId={} dirty={} fingerprint={}", tripId, dirty, startFingerprint);
             List<MapMatchingResult> results = matchTrajectory(before);
-
             List<TrackPoint> after = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
             String endFingerprint = buildFingerprint(tripId, after);
             if (!Objects.equals(startFingerprint, endFingerprint)) {
                 markTripMatchDirty(tripId);
-                log.warn("[TRACK_MATCH_RECOMPUTE] fingerprint changed during recompute, skip overwrite tripId={} startFp={} endFp={}",
-                        tripId, startFingerprint, endFingerprint);
+                log.warn("[TRACK_MATCH_RECOMPUTE] fingerprint changed during recompute, skip overwrite tripId={} startFp={} endFp={}", tripId, startFingerprint, endFingerprint);
                 return false;
             }
-
             LatestMatchPayload payload = new LatestMatchPayload();
             payload.tripId = tripId;
             payload.pointCount = after.size();
@@ -1427,12 +1418,9 @@ public class TrackPointServiceImpl implements TrackPointService {
             payload.fingerprint = endFingerprint;
             payload.generatedAt = System.currentTimeMillis();
             payload.results = resequenceCopy(results);
-
             saveLatestMatchPayload(tripId, payload);
             redisService.setString(fingerprintKey(tripId), endFingerprint, MATCH_LATEST_TTL_SECONDS);
             redisService.deleteKey(dirtyKey(tripId));
-            log.warn("[TRACK_MATCH_RECOMPUTE] finish tripId={} pointCount={} lastTs={} resultCount={}",
-                    tripId, payload.pointCount, payload.lastTs, payload.results == null ? 0 : payload.results.size());
             return true;
         } finally {
             releaseLockSafely(lockKey, lockValue);
@@ -1446,11 +1434,54 @@ public class TrackPointServiceImpl implements TrackPointService {
         }
         if (!Objects.equals(MATCH_ALGO_VERSION, payload.algoVersion)) {
             markTripMatchDirty(tripId);
-            log.warn("[TRACK_MATCH_LATEST] algo version mismatch tripId={} payloadAlgo={} currentAlgo={}",
-                    tripId, payload.algoVersion, MATCH_ALGO_VERSION);
+            log.warn("[TRACK_MATCH_LATEST] algo version mismatch tripId={} payloadAlgo={} currentAlgo={}", tripId, payload.algoVersion, MATCH_ALGO_VERSION);
             return new ArrayList<>();
         }
         return resequenceCopy(payload.results);
+    }
+
+    public String getMatchAlgoVersion() {
+        return MATCH_ALGO_VERSION;
+    }
+
+    public String buildCurrentTripFingerprint(Long tripId) {
+        List<TrackPoint> raw = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
+        return buildFingerprint(tripId, raw);
+    }
+
+    public TripRouteSnapshotPayload buildRouteSnapshotPayload(Long tripId) {
+        List<TrackPoint> rawTrackPoints = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
+        List<MapMatchingResult> matched = getLatestMatchedCache(tripId);
+        TripRouteSnapshotPayload payload = new TripRouteSnapshotPayload();
+        payload.setTripId(tripId);
+        payload.setAlgoVersion(MATCH_ALGO_VERSION);
+        payload.setFingerprint(buildFingerprint(tripId, rawTrackPoints));
+        payload.setPointCount(rawTrackPoints == null ? 0 : rawTrackPoints.size());
+        payload.setStartTs(rawTrackPoints == null || rawTrackPoints.isEmpty() ? null : rawTrackPoints.get(0).getTs());
+        payload.setEndTs(rawTrackPoints == null || rawTrackPoints.isEmpty() ? null : rawTrackPoints.get(rawTrackPoints.size() - 1).getTs());
+        payload.setGeneratedAt(System.currentTimeMillis());
+        payload.setMatchedResults(resequenceCopy(matched));
+        payload.setMatchedPolyline(buildMatchedPolyline(matched, CoordTypeVO.GCJ02));
+        payload.setReconstructedPolyline(buildReconstructedPolyline(matched, CoordTypeVO.GCJ02));
+        return payload;
+    }
+
+    public void warmLatestCacheFromSnapshot(TripRouteSnapshotPayload payload) {
+        if (payload == null || payload.getTripId() == null) {
+            return;
+        }
+        LatestMatchPayload cache = new LatestMatchPayload();
+        cache.tripId = payload.getTripId();
+        cache.pointCount = payload.getPointCount() == null ? 0 : payload.getPointCount();
+        cache.lastTs = payload.getEndTs() == null ? 0L : payload.getEndTs();
+        cache.algoVersion = payload.getAlgoVersion() == null ? MATCH_ALGO_VERSION : payload.getAlgoVersion();
+        cache.fingerprint = payload.getFingerprint();
+        cache.generatedAt = payload.getGeneratedAt() == null ? System.currentTimeMillis() : payload.getGeneratedAt();
+        cache.results = resequenceCopy(payload.getMatchedResults() == null ? Collections.emptyList() : payload.getMatchedResults());
+        saveLatestMatchPayload(payload.getTripId(), cache);
+        if (payload.getFingerprint() != null && !payload.getFingerprint().isBlank()) {
+            redisService.setString(fingerprintKey(payload.getTripId()), payload.getFingerprint(), MATCH_LATEST_TTL_SECONDS);
+        }
     }
 
     private String latestKey(Long tripId) {

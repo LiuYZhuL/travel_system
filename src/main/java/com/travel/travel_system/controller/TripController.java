@@ -3,6 +3,7 @@ package com.travel.travel_system.controller;
 import com.travel.travel_system.model.Trip;
 import com.travel.travel_system.service.HeatmapService;
 import com.travel.travel_system.service.TripService;
+import com.travel.travel_system.service.pub.RedisService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;

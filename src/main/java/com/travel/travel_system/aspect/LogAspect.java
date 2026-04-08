@@ -15,10 +15,11 @@ public class LogAspect {
 
     private static final Logger logger = LoggerFactory.getLogger(LogAspect.class);
 
-    // 定义切入点，拦截所有controller、service和utils包中的方法
+//     定义切入点，拦截所有controller、service和utils包中的方法
 //    @Pointcut("within(com.travel.travel_system.controller..*) ||" +
 //            " within(com.travel.travel_system.service..*) ||" +
-//            " within(com.travel.travel_system.utils..*)")
+//            " within(com.travel.travel_system.utils..*)" +
+//            "within(com.travel.travel_system.algorithm..*)")
 //    public void logPointcut() {}
 //
 //    // 前置通知，方法执行前记录日志
