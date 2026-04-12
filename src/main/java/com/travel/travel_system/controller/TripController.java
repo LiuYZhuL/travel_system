@@ -4,6 +4,7 @@ import com.travel.travel_system.model.Trip;
 import com.travel.travel_system.service.HeatmapService;
 import com.travel.travel_system.service.TripService;
 import com.travel.travel_system.utils.ApiResponse;
+import com.travel.travel_system.utils.DateTimeUtils;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
@@ -12,25 +13,12 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.web.bind.annotation.*;
 
-import java.text.SimpleDateFormat;
-import java.util.Collections;
-import java.util.Date;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.TimeZone;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/v1/trips")
 public class TripController extends BaseController {
-
-    private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
-
-    static {
-        DATE_FORMAT.setTimeZone(TimeZone.getTimeZone("Asia/Shanghai"));
-    }
 
     @Autowired
     private TripService tripService;
@@ -85,8 +73,8 @@ public class TripController extends BaseController {
                 item.put("tripId", trip.getId());
                 item.put("title", trip.getTitle());
                 item.put("status", trip.getStatus() != null ? trip.getStatus().name() : null);
-                item.put("startTime", formatDateTime(trip.getStartTime()));
-                item.put("endTime", formatDateTime(trip.getEndTime()));
+                item.put("startTime", DateTimeUtils.formatDateTime(trip.getStartTime()));
+                item.put("endTime", DateTimeUtils.formatDateTime(trip.getEndTime()));
                 item.put("distanceM", trip.getDistanceM() != null ? trip.getDistanceM() : 0L);
                 item.put("distanceText", formatDistance(trip.getDistanceM()));
                 item.put("durationSec", trip.getDurationSec() != null ? trip.getDurationSec() : 0L);
@@ -125,7 +113,7 @@ public class TripController extends BaseController {
             data.put("tripId", trip.getId());
             data.put("title", trip.getTitle());
             data.put("privacyMode", trip.getPrivacyMode() != null ? trip.getPrivacyMode().name() : null);
-            data.put("updatedAt", formatDateTime(trip.getUpdatedAt()));
+            data.put("updatedAt", DateTimeUtils.formatDateTime(trip.getUpdatedAt()));
             return success(data);
         } catch (Exception e) {
             return error("SYSTEM_500", "修改行程失败：" + e.getMessage());
@@ -162,7 +150,7 @@ public class TripController extends BaseController {
             Map<String, Object> data = new LinkedHashMap<>();
             data.put("tripId", trip.getId());
             data.put("status", trip.getStatus() != null ? trip.getStatus().name() : null);
-            data.put("endTime", formatDateTime(trip.getEndTime()));
+            data.put("endTime", DateTimeUtils.formatDateTime(trip.getEndTime()));
             return success(data);
         } catch (Exception e) {
             return error("SYSTEM_500", "结束行程失败：" + e.getMessage());
@@ -308,6 +296,33 @@ public class TripController extends BaseController {
         }
     }
 
+    @GetMapping("/{tripId}/photos")
+    public ApiResponse<?> getTripPhotos(@PathVariable Long tripId, HttpServletRequest request) {
+        try {
+            return success(tripService.getTripMedia(requireUserId(request), tripId, "photo"));
+        } catch (Exception e) {
+            return error("SYSTEM_500", "获取照片列表失败：" + e.getMessage());
+        }
+    }
+
+    @GetMapping("/{tripId}/videos")
+    public ApiResponse<?> getTripVideos(@PathVariable Long tripId, HttpServletRequest request) {
+        try {
+            return success(tripService.getTripMedia(requireUserId(request), tripId, "video"));
+        } catch (Exception e) {
+            return error("SYSTEM_500", "获取视频列表失败：" + e.getMessage());
+        }
+    }
+
+    @GetMapping("/{tripId}/media")
+    public ApiResponse<?> getTripAllMedia(@PathVariable Long tripId, HttpServletRequest request) {
+        try {
+            return success(tripService.getTripMedia(requireUserId(request), tripId, null));
+        } catch (Exception e) {
+            return error("SYSTEM_500", "获取媒体列表失败：" + e.getMessage());
+        }
+    }
+
     private Long requireUserId(HttpServletRequest request) {
         Long userId = (Long) request.getAttribute("userId");
         if (userId == null) {
@@ -318,10 +333,6 @@ public class TripController extends BaseController {
 
     private String asString(Object value) {
         return value == null ? null : String.valueOf(value);
-    }
-
-    private String formatDateTime(Date date) {
-        return date == null ? null : DATE_FORMAT.format(date);
     }
 
     private String formatDistance(Long meters) {

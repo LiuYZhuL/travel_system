@@ -37,4 +37,26 @@ public interface PlaceSummaryService {
     void deletePlaceSummariesByTrip(Long tripId);
 
     long countByTrip(Long tripId);
+
+    List<PlaceSummary> generatePlaceSummariesForTrip(Long tripId);
+
+    void generatePlaceSummariesForTripAsync(Long tripId);
+
+    void addMemberToPlaceSummary(Long placeSummaryId, String memberType, Long memberId, String memberRole, Float score);
+
+    void addMembersToPlaceSummary(Long placeSummaryId, List<PlaceSummaryMemberPayload> members);
+
+    List<PlaceSummaryMemberPayload> getPlaceSummaryMembers(Long placeSummaryId);
+
+    Optional<PlaceSummary> findNearestPlaceSummary(Long tripId, double lat, double lng, double radiusMeters);
+
+    void updatePoiInfo(Long placeSummaryId, String city, String district, String poiName);
+
+    record PlaceSummaryMemberPayload(
+        String memberType,
+        Long memberId,
+        String memberRole,
+        Float score,
+        Integer sortIndex
+    ) {}
 }

@@ -61,4 +61,6 @@ public interface TripService {
     Map<String, Object> getTrackStatus(Long userId, Long tripId);
 
     Map<String, Object> getUserTripStats(Long userId);
+
+    List<Map<String, Object>> getTripMedia(Long userId, Long tripId, String type);
 }

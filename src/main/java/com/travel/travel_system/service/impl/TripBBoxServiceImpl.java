@@ -3,6 +3,7 @@ package com.travel.travel_system.service.impl;
 import com.travel.travel_system.model.TripBBox;
 import com.travel.travel_system.repository.TripBBoxRepository;
 import com.travel.travel_system.service.TripBBoxService;
+import com.travel.travel_system.utils.GeoUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -14,8 +15,6 @@ public class TripBBoxServiceImpl implements TripBBoxService {
 
     @Autowired
     private TripBBoxRepository tripBBoxRepository;
-
-    private static final double EARTH_RADIUS_METERS = 6371000.0;
 
     @Override
     @Transactional
@@ -111,19 +110,6 @@ public class TripBBoxServiceImpl implements TripBBoxService {
         if (!isValidBBox(bbox)) {
             return 0.0;
         }
-
-        double minLat = Math.toRadians(bbox.getMinLat());
-        double maxLat = Math.toRadians(bbox.getMaxLat());
-        double minLng = Math.toRadians(bbox.getMinLng());
-        double maxLng = Math.toRadians(bbox.getMaxLng());
-
-        double dLat = maxLat - minLat;
-        double dLng = maxLng - minLng;
-
-        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                   Math.cos(minLat) * Math.cos(maxLat) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
-        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-
-        return EARTH_RADIUS_METERS * c;
+        return GeoUtils.haversineMeters(bbox.getMinLat(), bbox.getMinLng(), bbox.getMaxLat(), bbox.getMaxLng());
     }
 }

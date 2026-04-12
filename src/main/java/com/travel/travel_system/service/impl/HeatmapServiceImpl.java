@@ -3,6 +3,7 @@ package com.travel.travel_system.service.impl;
 import com.travel.travel_system.model.TrackPoint;
 import com.travel.travel_system.repository.TrackPointRepository;
 import com.travel.travel_system.service.HeatmapService;
+import com.travel.travel_system.utils.GeoUtils;
 import com.travel.travel_system.vo.HeatmapPointVO;
 import com.travel.travel_system.vo.UserHeatmapVO;
 import com.travel.travel_system.vo.enums.HeatmapScopeVO;
@@ -153,7 +154,7 @@ public class HeatmapServiceImpl implements HeatmapService {
                 long dtSec = Math.max(0L, (point.ts - prev.ts) / 1000L);
                 if (dtSec > 0) {
                     dtSec = Math.min(dtSec, MAX_DT_SEC);
-                    double dist = calculateGreatCircleDistance(prev.lat, prev.lng, point.lat, point.lng);
+                    double dist = GeoUtils.haversineMeters(prev.lat, prev.lng, point.lat, point.lng);
                     if (dist <= STAY_DISTANCE_M) {
                         cell.staySec += dtSec;
                         cell.weightScore += Math.min(6.0, dtSec / 20.0);
@@ -210,7 +211,7 @@ public class HeatmapServiceImpl implements HeatmapService {
             long ts = point.getTs();
             if (ts == lastTs && !decoded.isEmpty()) {
                 DecodedPoint prev = decoded.get(decoded.size() - 1);
-                if (calculateGreatCircleDistance(prev.lat, prev.lng, lat, lng) < 3.0) {
+                if (GeoUtils.haversineMeters(prev.lat, prev.lng, lat, lng) < 3.0) {
                     continue;
                 }
             }
@@ -372,20 +373,6 @@ public class HeatmapServiceImpl implements HeatmapService {
             bits |= ((long) bytes[i] & 0xFFL) << (i * 8);
         }
         return Double.longBitsToDouble(bits);
-    }
-
-    private double calculateGreatCircleDistance(double lat1, double lon1, double lat2, double lon2) {
-        double rLat1 = Math.toRadians(lat1);
-        double rLon1 = Math.toRadians(lon1);
-        double rLat2 = Math.toRadians(lat2);
-        double rLon2 = Math.toRadians(lon2);
-
-        double dLat = rLat2 - rLat1;
-        double dLon = rLon2 - rLon1;
-        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
-                + Math.cos(rLat1) * Math.cos(rLat2) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-        double c = 2.0 * Math.atan2(Math.sqrt(a), Math.sqrt(1.0 - a));
-        return 6_371_000.0 * c;
     }
 
     private static <K, V> Map<K, V> synchronizedLruMap(int maxEntries) {

@@ -6,11 +6,11 @@ import com.travel.travel_system.model.enums.PrivacyMode;
 import com.travel.travel_system.repository.*;
 import com.travel.travel_system.service.AiService;
 import com.travel.travel_system.utils.AiApiClient;
+import com.travel.travel_system.utils.DateTimeUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -62,10 +62,10 @@ public class AiServiceImpl implements AiService {
         Map<String, Object> tripData = new HashMap<>();
         tripData.put("tripId", tripId);
         tripData.put("title", trip.getTitle());
-        tripData.put("startTime", formatDateTime(trip.getStartTime()));
-        tripData.put("endTime", trip.getEndTime() != null ? formatDateTime(trip.getEndTime()) : null);
+        tripData.put("startTime", DateTimeUtils.formatDateTime(trip.getStartTime()));
+        tripData.put("endTime", trip.getEndTime() != null ? DateTimeUtils.formatDateTime(trip.getEndTime()) : null);
         tripData.put("distanceText", formatDistance(trip.getDistanceM()));
-        tripData.put("durationText", formatDuration(trip.getDurationSec()));
+        tripData.put("durationText", DateTimeUtils.formatDuration(trip.getDurationSec()));
         
         // 5. 提取地点信息
         List<String> placeNames = places.stream()
@@ -81,7 +81,7 @@ public class AiServiceImpl implements AiService {
                 .orElse(null);
         if (longestStay != null) {
             tripData.put("longestStayPlace", longestStay.getPoiName());
-            tripData.put("longestStayDuration", formatDuration(longestStay.getDurationSec()));
+            tripData.put("longestStayDuration", DateTimeUtils.formatDuration(longestStay.getDurationSec()));
         }
 
         // 7. 调用 AI API 生成总结
@@ -403,7 +403,7 @@ public class AiServiceImpl implements AiService {
         tripData.put("tripId", tripId);
         tripData.put("destination", !placeNames.isEmpty() ? placeNames.get(0).split(" ")[0] : "未知目的地");
         tripData.put("places", String.join(", ", placeNames));
-        tripData.put("startTime", formatDateTime(trip.getStartTime()));
+        tripData.put("startTime", DateTimeUtils.formatDateTime(trip.getStartTime()));
         tripData.put("type", "文化旅游");
 
         // 4. 调用 AI API 生成建议
@@ -466,7 +466,7 @@ public class AiServiceImpl implements AiService {
         }
         
         if (trip.getDurationSec() != null && trip.getDurationSec() > 0) {
-            summary.append("，耗时").append(formatDuration(trip.getDurationSec()));
+            summary.append("，耗时").append(DateTimeUtils.formatDuration(trip.getDurationSec()));
         }
         
         summary.append("。留下了美好的回忆。");
@@ -565,7 +565,7 @@ public class AiServiceImpl implements AiService {
         }
         
         if (place.getDurationSec() != null && place.getDurationSec() > 0) {
-            text.append("停留了").append(formatDuration(place.getDurationSec()));
+            text.append("停留了").append(DateTimeUtils.formatDuration(place.getDurationSec()));
         }
         
         if (place.getPhotoCount() != null && place.getPhotoCount() > 0) {
@@ -622,32 +622,5 @@ public class AiServiceImpl implements AiService {
             return String.format("%.1f km", meters / 1000.0);
         }
         return meters + " m";
-    }
-
-    /**
-     * 格式化时长
-     */
-    private String formatDuration(Long seconds) {
-        if (seconds == null || seconds <= 0) {
-            return "0 分钟";
-        }
-        long hours = seconds / 3600;
-        long minutes = (seconds % 3600) / 60;
-        
-        if (hours > 0) {
-            return hours + "小时" + minutes + "分钟";
-        }
-        return minutes + "分钟";
-    }
-
-    /**
-     * 格式化日期时间
-     */
-    private String formatDateTime(Date date) {
-        if (date == null) {
-            return null;
-        }
-        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
-        return sdf.format(date);
     }
 }

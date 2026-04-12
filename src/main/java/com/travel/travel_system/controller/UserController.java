@@ -7,16 +7,15 @@ import com.travel.travel_system.service.TripService;
 import com.travel.travel_system.service.UserService;
 import com.travel.travel_system.service.pub.OssService;
 import com.travel.travel_system.utils.ApiResponse;
+import com.travel.travel_system.utils.DateTimeUtils;
 import com.travel.travel_system.vo.UserHeatmapVO;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.text.SimpleDateFormat;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.TimeZone;
 
 @RestController
 @RequestMapping("/api/v1/users/me")
@@ -33,12 +32,6 @@ public class UserController extends BaseController {
 
     @Autowired
     private OssService ossService;
-
-    private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
-
-    static {
-        DATE_FORMAT.setTimeZone(TimeZone.getTimeZone("UTC"));
-    }
 
     /**
      * 获取用户主页
@@ -64,7 +57,7 @@ public class UserController extends BaseController {
             profile.put("defaultPrivacyMode", user.getDefaultPrivacyMode() != null
                     ? user.getDefaultPrivacyMode().toString()
                     : PrivacyMode.PRIVATE.toString());
-            profile.put("createdAt", formatDateTime(user.getCreatedAt()));
+            profile.put("createdAt", DateTimeUtils.formatDateTime(user.getCreatedAt()));
             homeData.put("profile", profile);
             homeData.put("stats", tripService.getUserTripStats(user.getId()));
             return success(homeData);
@@ -96,7 +89,7 @@ public class UserController extends BaseController {
             userData.put("defaultPrivacyMode", user.getDefaultPrivacyMode() != null
                     ? user.getDefaultPrivacyMode().toString()
                     : PrivacyMode.PRIVATE.toString());
-            userData.put("createdAt", formatDateTime(user.getCreatedAt()));
+            userData.put("createdAt", DateTimeUtils.formatDateTime(user.getCreatedAt()));
             return success(userData);
         } catch (Exception e) {
             return error("SYSTEM_500", "获取用户信息失败：" + e.getMessage());
@@ -131,7 +124,7 @@ public class UserController extends BaseController {
             userData.put("defaultPrivacyMode", updatedUser.getDefaultPrivacyMode() != null
                     ? updatedUser.getDefaultPrivacyMode().toString()
                     : PrivacyMode.PRIVATE.toString());
-            userData.put("updatedAt", formatDateTime(updatedUser.getUpdatedAt()));
+            userData.put("updatedAt", DateTimeUtils.formatDateTime(updatedUser.getUpdatedAt()));
             return success(userData);
         } catch (Exception e) {
             return error("SYSTEM_500", "更新用户资料失败：" + e.getMessage());
@@ -161,7 +154,7 @@ public class UserController extends BaseController {
             Map<String, Object> userData = new LinkedHashMap<>();
             userData.put("id", updatedUser.getId());
             userData.put("nickname", updatedUser.getNickname());
-            userData.put("updatedAt", formatDateTime(updatedUser.getUpdatedAt()));
+            userData.put("updatedAt", DateTimeUtils.formatDateTime(updatedUser.getUpdatedAt()));
             return success(userData);
         } catch (Exception e) {
             return error("SYSTEM_500", "更新昵称失败：" + e.getMessage());
@@ -188,10 +181,10 @@ public class UserController extends BaseController {
             Map<String, Object> userData = new LinkedHashMap<>();
             userData.put("id", updatedUser.getId());
             userData.put("avatarUrl", updatedUser.getAvatarUrl());
-            userData.put("updatedAt", formatDateTime(updatedUser.getUpdatedAt()));
+            userData.put("updatedAt", DateTimeUtils.formatDateTime(updatedUser.getUpdatedAt()));
             return success(userData);
         } catch (Exception e) {
-            return error("SYSTEM_500", "更新头像失败：" + e.getMessage());
+            return error("SYSTEM_500", "更新头像URL失败：" + e.getMessage());
         }
     }
 
@@ -262,10 +255,6 @@ public class UserController extends BaseController {
         }
         String value = String.valueOf(openId);
         return value.trim().isEmpty() ? null : value;
-    }
-
-    private String formatDateTime(java.util.Date date) {
-        return date == null ? null : DATE_FORMAT.format(date);
     }
 
     private String asString(Object value) {

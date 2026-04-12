@@ -12,6 +12,8 @@ import com.travel.travel_system.repository.*;
 import com.travel.travel_system.service.*;
 import com.travel.travel_system.vo.*;
 import com.travel.travel_system.vo.enums.*;
+import com.travel.travel_system.utils.DateTimeUtils;
+import com.travel.travel_system.utils.GeoUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,6 +28,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 @Service
@@ -61,6 +64,8 @@ public class TripServiceImpl implements TripService {
     private TripRouteSnapshotService tripRouteSnapshotService;
     @Autowired
     private TripSegmentRepository tripSegmentRepository;
+    @Autowired
+    private PlaceSummaryService placeSummaryService;
 
     private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
     private static final SimpleDateFormat DATE_ONLY_FORMAT = new SimpleDateFormat("yyyy-MM-dd");
@@ -226,7 +231,20 @@ public class TripServiceImpl implements TripService {
         Trip saved = tripRepository.save(trip);
 
         closeOpenSegment(tripId, nowTs, "FINISH");
-        finalizeTripAsync(tripId);
+        CompletableFuture.runAsync(() -> {
+            try {
+                settleTrip(tripId);
+            } catch (Exception e) {
+                log.error("[TRIP_FINALIZE_ASYNC] tripId={} failed: {}", tripId, e.getMessage(), e);
+                tripRepository.findById(tripId).ifPresent(t -> {
+                    if (t.getStatus() == TripStatus.PROCESSING) {
+                        t.setStatus(TripStatus.FAILED);
+                        t.setUpdatedAt(new Date());
+                        tripRepository.save(t);
+                    }
+                });
+            }
+        });
 
         return saved;
     }
@@ -337,6 +355,12 @@ public class TripServiceImpl implements TripService {
         trip.setVideoCount((int) videoRepository.countByTripId(tripId));
 
         try {
+            placeSummaryService.generatePlaceSummariesForTrip(tripId);
+        } catch (Exception e) {
+            log.warn("[settleTrip] 生成地点摘要失败: tripId={}, error={}", tripId, e.getMessage());
+        }
+
+        try {
             aiService.generateTripSummary(tripId);
         } catch (Exception ignored) {
         }
@@ -362,7 +386,7 @@ public class TripServiceImpl implements TripService {
         statistics.put("distanceM", defaultLong(trip.getDistanceM()));
         statistics.put("distanceText", formatDistance(trip.getDistanceM()));
         statistics.put("durationSec", defaultLong(trip.getDurationSec()));
-        statistics.put("durationText", formatDuration(trip.getDurationSec()));
+        statistics.put("durationText", DateTimeUtils.formatDuration(trip.getDurationSec()));
         statistics.put("photoCount", defaultInteger(trip.getPhotoCount()));
         statistics.put("videoCount", defaultInteger(trip.getVideoCount()));
         statistics.put("placeCount", (int) placeSummaryRepository.countByTripId(tripId));
@@ -416,55 +440,26 @@ public class TripServiceImpl implements TripService {
         TripMapVO.BBoxVO bbox = buildBBox(tripId, trackPoints, displayCoordType);
         GeoPointVO center = buildCenter(bbox, displayCoordType);
 
-        // 1) 先尝试从 snapshot 秒开
-        try {
-            Optional<TripRouteSnapshotPayload> payloadOpt =
-                    tripRouteSnapshotService.loadSnapshotPayloadAndWarmRedis(tripId);
+        List<MapMarkerVO> mediaMarkers = buildMediaMarkersForMap(tripId, displayCoordType);
 
-            if (payloadOpt.isPresent()) {
-                TripRouteSnapshotPayload payload = payloadOpt.get();
+        Map<String, Object> renderData = trackPointService.processTrackRendering(tripId);
 
-                TrackPolylineVO rawPolyline = emptyPolyline();
-                TrackPolylineVO matchedPolyline = payload.getMatchedPolyline() != null
-                        ? payload.getMatchedPolyline()
-                        : emptyPolyline();
-                TrackPolylineVO reconstructedPolyline = payload.getReconstructedPolyline() != null
-                        ? payload.getReconstructedPolyline()
-                        : emptyPolyline();
+        @SuppressWarnings("unchecked")
+        List<TrackPolylineVO> rawSegments = (List<TrackPolylineVO>) renderData.getOrDefault("rawSegments", Collections.emptyList());
+        @SuppressWarnings("unchecked")
+        List<TrackPolylineVO> matchedSegments = (List<TrackPolylineVO>) renderData.getOrDefault("matchedSegments", Collections.emptyList());
+        @SuppressWarnings("unchecked")
+        List<TrackPolylineVO> reconstructedSegments = (List<TrackPolylineVO>) renderData.getOrDefault("reconstructedSegments", Collections.emptyList());
 
-                // 后台异步刷新 latest snapshot，给路网读取/重算留缓冲时间
-                refreshLatestSnapshotAsync(tripId);
-
-                return TripMapVO.builder()
-                        .center(center)
-                        .zoom(resolveZoom(bbox))
-                        .bbox(bbox)
-                        .rawPolyline(rawPolyline)
-                        .matchedPolyline(matchedPolyline)
-                        .reconstructedPolyline(reconstructedPolyline)
-                        .markers(buildMapMarkers(tripId, displayCoordType, trackPoints))
-                        .build();
-            }
-        } catch (Exception e) {
-            log.warn("[TRIP_ROUTE_SNAPSHOT] pre-read snapshot failed tripId={}: {}", tripId, e.getMessage(), e);
+        @SuppressWarnings("unchecked")
+        List<MapMarkerVO> renderMediaMarkers = (List<MapMarkerVO>) renderData.getOrDefault("mediaMarkers", Collections.emptyList());
+        if (!renderMediaMarkers.isEmpty()) {
+            mediaMarkers = renderMediaMarkers;
         }
 
-        // 2) snapshot 没有，再走实时处理
-        TrackPolylineVO rawPolyline = emptyPolyline();
-        TrackPolylineVO matchedPolyline = emptyPolyline();
-        TrackPolylineVO reconstructedPolyline = emptyPolyline();
-
-        if (!trackPoints.isEmpty()) {
-            Map<String, TrackPolylineVO> processed =
-                    trackPointService.processTrackPoints(tripId, toOriginalPointMaps(trackPoints));
-
-            rawPolyline = processed.getOrDefault("rawPolyline", emptyPolyline());
-            matchedPolyline = processed.getOrDefault("matchedPolyline", emptyPolyline());
-            reconstructedPolyline = processed.getOrDefault("reconstructedPolyline", emptyPolyline());
-
-            // 实时算出来以后，也异步存一份 latest snapshot
-            refreshLatestSnapshotAsync(tripId);
-        }
+        TrackPolylineVO rawPolyline = mergeTrackPolylineList(rawSegments);
+        TrackPolylineVO matchedPolyline = mergeTrackPolylineList(matchedSegments);
+        TrackPolylineVO reconstructedPolyline = mergeTrackPolylineList(reconstructedSegments);
 
         return TripMapVO.builder()
                 .center(center)
@@ -473,7 +468,11 @@ public class TripServiceImpl implements TripService {
                 .rawPolyline(rawPolyline)
                 .matchedPolyline(matchedPolyline)
                 .reconstructedPolyline(reconstructedPolyline)
+                .rawSegments(rawSegments.isEmpty() ? null : rawSegments)
+                .matchedSegments(matchedSegments.isEmpty() ? null : matchedSegments)
+                .reconstructedSegments(reconstructedSegments.isEmpty() ? null : reconstructedSegments)
                 .markers(buildMapMarkers(tripId, displayCoordType, trackPoints))
+                .mediaMarkers(mediaMarkers)
                 .build();
     }
     @Override
@@ -511,7 +510,7 @@ public class TripServiceImpl implements TripService {
                     .highlights(parseHighlights(summary.getHighlights()))
                     .routeSummary(summary.getRouteSummary())
                     .bestMoment(summary.getBestMoment())
-                    .generatedAt(formatDateTime(summary.getGeneratedAt()))
+                    .generatedAt(DateTimeUtils.formatDateTime(summary.getGeneratedAt()))
                     .version(summary.getVersion())
                     .build();
         }
@@ -542,7 +541,7 @@ public class TripServiceImpl implements TripService {
         data.put("tripId", trip.getId());
         data.put("title", trip.getTitle());
         data.put("status", trip.getStatus() != null ? trip.getStatus().name() : null);
-        data.put("startTime", formatDateTime(trip.getStartTime()));
+        data.put("startTime", DateTimeUtils.formatDateTime(trip.getStartTime()));
         return data;
     }
 
@@ -619,7 +618,7 @@ public class TripServiceImpl implements TripService {
         data.put("processing", trip.getStatus() == TripStatus.PROCESSING);
         data.put("processedCount", trip.getStatus() == TripStatus.PROCESSING ? 0 : totalCount);
         data.put("totalCount", totalCount);
-        data.put("lastUpdatedAt", formatDateTime(trip.getUpdatedAt()));
+        data.put("lastUpdatedAt", DateTimeUtils.formatDateTime(trip.getUpdatedAt()));
         return data;
     }
 
@@ -636,7 +635,7 @@ public class TripServiceImpl implements TripService {
         stats.put("totalDistanceM", totalDistanceM != null ? totalDistanceM : 0L);
         stats.put("totalDistanceText", formatDistance(totalDistanceM));
         stats.put("totalDurationSec", totalDurationSec != null ? totalDurationSec : 0L);
-        stats.put("totalDurationText", formatDuration(totalDurationSec));
+        stats.put("totalDurationText", DateTimeUtils.formatDuration(totalDurationSec));
         stats.put("totalPhotoCount", totalPhotoCount != null ? totalPhotoCount : 0);
         stats.put("totalVideoCount", totalVideoCount != null ? totalVideoCount : 0);
         return stats;
@@ -662,7 +661,7 @@ public class TripServiceImpl implements TripService {
                     .type(null)
                     .point(point)
                     .title(place.getPoiName())
-                    .subTitle(formatDuration(normalizePlaceDuration(place.getDurationSec())))
+                    .subTitle(DateTimeUtils.formatDuration(normalizePlaceDuration(place.getDurationSec())))
                     .placeId(place.getId())
                     .calloutText(place.getPoiName())
                     .build());
@@ -678,12 +677,12 @@ public class TripServiceImpl implements TripService {
                 .privacyMode(toPrivacyModeVO(trip.getPrivacyMode()))
                 .summaryText(trip.getSummaryText())
                 .cover(null)
-                .startTime(formatDateTime(trip.getStartTime()))
-                .endTime(formatDateTime(trip.getEndTime()))
+                .startTime(DateTimeUtils.formatDateTime(trip.getStartTime()))
+                .endTime(DateTimeUtils.formatDateTime(trip.getEndTime()))
                 .distanceM(defaultLong(trip.getDistanceM()))
                 .distanceText(formatDistance(trip.getDistanceM()))
                 .durationSec(defaultLong(trip.getDurationSec()))
-                .durationText(formatDuration(trip.getDurationSec()))
+                .durationText(DateTimeUtils.formatDuration(trip.getDurationSec()))
                 .photoCount(defaultInteger(trip.getPhotoCount()))
                 .videoCount(defaultInteger(trip.getVideoCount()))
                 .placeCount(placeCount)
@@ -713,10 +712,10 @@ public class TripServiceImpl implements TripService {
                 .city(place.getCity())
                 .district(place.getDistrict())
                 .centerPoint(buildGeoPoint(place.getCenterLatEnc(), place.getCenterLngEnc(), null, null, CoordType.GCJ02, CoordTypeVO.GCJ02))
-                .startTime(formatDateTime(place.getStartTime()))
-                .endTime(formatDateTime(place.getEndTime()))
+                .startTime(DateTimeUtils.formatDateTime(place.getStartTime()))
+                .endTime(DateTimeUtils.formatDateTime(place.getEndTime()))
                 .durationSec(normalizePlaceDuration(place.getDurationSec()))
-                .durationText(formatDuration(normalizePlaceDuration(place.getDurationSec())))
+                .durationText(DateTimeUtils.formatDuration(normalizePlaceDuration(place.getDurationSec())))
                 .photoCount(defaultInteger(place.getPhotoCount()))
                 .videoCount(defaultInteger(place.getVideoCount()))
                 .coverMedia(coverMedia)
@@ -735,8 +734,8 @@ public class TripServiceImpl implements TripService {
                 .id(block.getId() != null ? String.valueOf(block.getId()) : null)
                 .tripId(block.getTripId())
                 .type(toStoryBlockTypeVO(block.getBlockType()))
-                .sortTime(formatDateTime(block.getSortTime()))
-                .displayTimeText(formatDisplayTime(block.getSortTime()))
+                .sortTime(DateTimeUtils.formatDateTime(block.getSortTime()))
+                .displayTimeText(DateTimeUtils.formatTime(block.getSortTime()))
                 .locationName(relatedPlace != null ? relatedPlace.getPoiName() : null)
                 .point(relatedPlace != null ? relatedPlace.getCenterPoint() : null)
                 .title(block.getTitle())
@@ -763,7 +762,7 @@ public class TripServiceImpl implements TripService {
                 .tripId(block.getTripId())
                 .url(block.getCoverObjectKey())
                 .thumbnailUrl(block.getCoverObjectKey())
-                .createdAt(formatDateTime(block.getSortTime()))
+                .createdAt(DateTimeUtils.formatDateTime(block.getSortTime()))
                 .type(inferMediaType(block.getBlockType()))
                 .locationName(block.getTitle())
                 .build();
@@ -776,8 +775,8 @@ public class TripServiceImpl implements TripService {
                 .type(MediaTypeVO.PHOTO)
                 .url(photo.getObjectKey())
                 .thumbnailUrl(photo.getObjectKey())
-                .shotTime(formatDateTime(photo.getShotTimeExif()))
-                .createdAt(formatDateTime(photo.getCreatedAt()))
+                .shotTime(DateTimeUtils.formatDateTime(photo.getShotTimeExif()))
+                .createdAt(DateTimeUtils.formatDateTime(photo.getCreatedAt()))
                 .caption(photo.getUserCaption())
                 .privacyMode(toPrivacyModeVO(photo.getPrivacyMode()))
                 .isCover(Boolean.TRUE.equals(photo.getIsCover()))
@@ -792,8 +791,8 @@ public class TripServiceImpl implements TripService {
                 .type(MediaTypeVO.VIDEO)
                 .url(video.getObjectKey())
                 .thumbnailUrl(video.getThumbnailObjectKey())
-                .shotTime(formatDateTime(video.getShotTimeExif()))
-                .createdAt(formatDateTime(video.getCreatedAt()))
+                .shotTime(DateTimeUtils.formatDateTime(video.getShotTimeExif()))
+                .createdAt(DateTimeUtils.formatDateTime(video.getCreatedAt()))
                 .durationSec(video.getDurationSec())
                 .resolution(video.getResolution())
                 .caption(video.getUserCaption())
@@ -822,7 +821,7 @@ public class TripServiceImpl implements TripService {
                 .highlights(highlights)
                 .routeSummary(asString(summary.get("routeSummary")))
                 .bestMoment(asString(summary.get("bestMoment")))
-                .generatedAt(formatGeneratedAt(summary.get("generatedAt")))
+                .generatedAt(DateTimeUtils.formatGeneratedAt(summary.get("generatedAt")))
                 .version(asString(summary.get("version")))
                 .build();
     }
@@ -922,7 +921,7 @@ public class TripServiceImpl implements TripService {
         StringBuilder story = new StringBuilder();
         story.append("这是一次").append(trip.getTitle()).append("的旅程");
         if (defaultLong(trip.getDistanceM()) > 0) story.append("，总行程").append(formatDistance(trip.getDistanceM()));
-        if (defaultLong(trip.getDurationSec()) > 0) story.append("，耗时").append(formatDuration(trip.getDurationSec()));
+        if (defaultLong(trip.getDurationSec()) > 0) story.append("，耗时").append(DateTimeUtils.formatDuration(trip.getDurationSec()));
         story.append("。旅途中留下了").append(defaultInteger(trip.getPhotoCount())).append("张照片和").append(defaultInteger(trip.getVideoCount())).append("个视频，记录了美好的瞬间。");
         return story.toString();
     }
@@ -1099,6 +1098,40 @@ public class TripServiceImpl implements TripService {
         return TrackPolylineVO.builder().points(Collections.emptyList()).distanceM(0L).simplified(Boolean.FALSE).build();
     }
 
+    private TrackPolylineVO mergeTrackPolylineList(List<TrackPolylineVO> segments) {
+        if (segments == null || segments.isEmpty()) return emptyPolyline();
+        List<GeoPointVO> allPoints = new ArrayList<>();
+        for (TrackPolylineVO seg : segments) {
+            if (seg != null && seg.getPoints() != null) {
+                allPoints.addAll(seg.getPoints());
+            }
+        }
+        return TrackPolylineVO.builder().points(allPoints).distanceM(0L).simplified(Boolean.FALSE).build();
+    }
+
+    private List<MapMarkerVO> buildMediaMarkersForMap(Long tripId, CoordTypeVO displayCoordType) {
+        List<MapMarkerVO> markers = new ArrayList<>();
+        List<Anchor> anchors = anchorRepository.findByTripIdOrderByMatchedTsAsc(tripId);
+        for (Anchor anchor : anchors) {
+            if (anchor.getLatEnc() == null || anchor.getLngEnc() == null) continue;
+            double lat = bytesToDouble(anchor.getLatEnc());
+            double lng = bytesToDouble(anchor.getLngEnc());
+            if (!isValidCoordinate(lat, lng)) continue;
+            double[] display = toDisplayCoord(lat, lng, CoordType.WGS84, displayCoordType);
+            String title = "";
+            if (anchor.getPhotoId() != null) title = "照片";
+            else if (anchor.getVideoId() != null) title = "视频";
+            markers.add(MapMarkerVO.builder()
+                    .id("media-" + anchor.getId())
+                    .type(MarkerTypeVO.MEDIA)
+                    .point(GeoPointVO.builder().lat(display[0]).lng(display[1]).coordType(displayCoordType).build())
+                    .title(title)
+                    .mediaId(anchor.getPhotoId() != null ? anchor.getPhotoId() : anchor.getVideoId())
+                    .build());
+        }
+        return markers;
+    }
+
     private GeoPointVO buildGeoPoint(byte[] latEnc, byte[] lngEnc, Float accuracyM, Long ts, CoordType sourceCoordType, CoordTypeVO displayCoordType) {
         double lat = bytesToDouble(latEnc), lng = bytesToDouble(lngEnc);
         if (!isValidCoordinate(lat, lng)) return null;
@@ -1139,73 +1172,15 @@ public class TripServiceImpl implements TripService {
             if (sourceCoordType == CoordType.GCJ02) {
                 return new double[]{lat, lng};
             }
-            return wgs84ToGcj02(lat, lng);
+            return GeoUtils.wgs84ToGcj02(lat, lng);
         }
         if (sourceCoordType == CoordType.GCJ02) {
-            return gcj02ToWgs84(lat, lng);
+            return GeoUtils.gcj02ToWgs84(lat, lng);
         }
         return new double[]{lat, lng};
     }
 
-    private static final double PI = Math.PI;
-    private static final double A = 6378245.0;
-    private static final double EE = 0.00669342162296594323;
-
-    private double[] wgs84ToGcj02(double lat, double lon) {
-        if (outOfChina(lat, lon)) {
-            return new double[]{lat, lon};
-        }
-        double[] delta = delta(lat, lon);
-        return new double[]{lat + delta[0], lon + delta[1]};
-    }
-
-    private double[] gcj02ToWgs84(double lat, double lon) {
-        if (outOfChina(lat, lon)) {
-            return new double[]{lat, lon};
-        }
-        double[] delta = delta(lat, lon);
-        double mgLat = lat + delta[0];
-        double mgLon = lon + delta[1];
-        return new double[]{lat * 2 - mgLat, lon * 2 - mgLon};
-    }
-
-    private boolean outOfChina(double lat, double lon) {
-        return lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271;
-    }
-
-    private double[] delta(double lat, double lon) {
-        double dLat = transformLat(lon - 105.0, lat - 35.0);
-        double dLon = transformLon(lon - 105.0, lat - 35.0);
-        double radLat = lat / 180.0 * PI;
-        double magic = Math.sin(radLat);
-        magic = 1 - EE * magic * magic;
-        double sqrtMagic = Math.sqrt(magic);
-        dLat = (dLat * 180.0) / ((A * (1 - EE)) / (magic * sqrtMagic) * PI);
-        dLon = (dLon * 180.0) / (A / sqrtMagic * Math.cos(radLat) * PI);
-        return new double[]{dLat, dLon};
-    }
-
-    private double transformLat(double x, double y) {
-        double ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
-        ret += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0;
-        ret += (20.0 * Math.sin(y * PI) + 40.0 * Math.sin(y / 3.0 * PI)) * 2.0 / 3.0;
-        ret += (160.0 * Math.sin(y / 12.0 * PI) + 320 * Math.sin(y * PI / 30.0)) * 2.0 / 3.0;
-        return ret;
-    }
-
-    private double transformLon(double x, double y) {
-        double ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
-        ret += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0;
-        ret += (20.0 * Math.sin(x * PI) + 40.0 * Math.sin(x / 3.0 * PI)) * 2.0 / 3.0;
-        ret += (150.0 * Math.sin(x / 12.0 * PI) + 300.0 * Math.sin(x / 30.0 * PI)) * 2.0 / 3.0;
-        return ret;
-    }
-
-    private String formatDateTime(Date date) { return date == null ? null : DATE_FORMAT.format(date); }
-    private String formatGeneratedAt(Object value) { return value instanceof Date d ? formatDateTime(d) : (value != null ? String.valueOf(value) : null); }
-    private String formatDisplayTime(Date date) { if (date == null) return null; SimpleDateFormat sdf = new SimpleDateFormat("HH:mm"); sdf.setTimeZone(TimeZone.getTimeZone("Asia/Shanghai")); return sdf.format(date); }
     private String formatDistance(Long meters) { if (meters == null || meters <= 0) return "0 m"; if (meters >= 1000) return String.format(Locale.ROOT, "%.1f km", meters / 1000.0); return meters + " m"; }
-    private String formatDuration(Long seconds) { if (seconds == null || seconds <= 0) return "0 分钟"; long hours = seconds / 3600L, minutes = (seconds % 3600L) / 60L; return hours > 0 ? hours + " 小时 " + minutes + " 分钟" : Math.max(1, minutes) + " 分钟"; }
     private Long normalizePlaceDuration(Long duration) { if (duration == null) return 0L; return duration > 86_400L * 30 && duration % 1000L == 0 ? duration / 1000L : duration; }
     private double bytesToDouble(byte[] bytes) {
         if (bytes == null || bytes.length < 8) return Double.NaN;
@@ -1235,4 +1210,67 @@ public class TripServiceImpl implements TripService {
     private PrivacyModeVO toPrivacyModeVO(PrivacyMode privacyMode) { return privacyMode == null ? null : PrivacyModeVO.valueOf(privacyMode.name()); }
     private StoryBlockTypeVO toStoryBlockTypeVO(BlockType type) { if (type == null) return null; try { return StoryBlockTypeVO.valueOf(type.name()); } catch (Exception e) { return StoryBlockTypeVO.TEXT; } }
     private PrivacyMode parsePrivacyModeOrDefault(String input, PrivacyMode defaultValue) { try { return input == null || input.trim().isEmpty() ? defaultValue : PrivacyMode.valueOf(input.trim().toUpperCase(Locale.ROOT)); } catch (Exception e) { return defaultValue; } }
+
+    @Override
+    public List<Map<String, Object>> getTripMedia(Long userId, Long tripId, String type) {
+        getUserTripOrThrow(userId, tripId);
+        List<Map<String, Object>> result = new ArrayList<>();
+        
+        if (type == null || "photo".equalsIgnoreCase(type)) {
+            List<Photo> photos = photoRepository.findByTripId(tripId);
+            for (Photo photo : photos) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("id", photo.getId());
+                item.put("type", "photo");
+                item.put("url", photo.getObjectKey());
+                item.put("thumbnailUrl", photo.getObjectKey());
+                item.put("capturedAt", photo.getShotTimeExif() != null ? photo.getShotTimeExif().getTime() : null);
+                item.put("createdAt", photo.getCreatedAt() != null ? photo.getCreatedAt().getTime() : null);
+                item.put("caption", photo.getUserCaption());
+                Double lat = bytesToDouble(photo.getLatEnc());
+                Double lng = bytesToDouble(photo.getLngEnc());
+                if (isValidCoordinate(lat, lng)) {
+                    Map<String, Object> location = new LinkedHashMap<>();
+                    location.put("lat", lat);
+                    location.put("lng", lng);
+                    item.put("location", location);
+                }
+                result.add(item);
+            }
+        }
+        
+        if (type == null || "video".equalsIgnoreCase(type)) {
+            List<Video> videos = videoRepository.findByTripId(tripId);
+            for (Video video : videos) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("id", video.getId());
+                item.put("type", "video");
+                item.put("url", video.getObjectKey());
+                item.put("thumbnailUrl", video.getThumbnailObjectKey());
+                item.put("duration", video.getDurationSec());
+                item.put("capturedAt", video.getShotTimeExif() != null ? video.getShotTimeExif().getTime() : null);
+                item.put("createdAt", video.getCreatedAt() != null ? video.getCreatedAt().getTime() : null);
+                item.put("caption", video.getUserCaption());
+                Double lat = bytesToDouble(video.getLatEnc());
+                Double lng = bytesToDouble(video.getLngEnc());
+                if (isValidCoordinate(lat, lng)) {
+                    Map<String, Object> location = new LinkedHashMap<>();
+                    location.put("lat", lat);
+                    location.put("lng", lng);
+                    item.put("location", location);
+                }
+                result.add(item);
+            }
+        }
+        
+        result.sort((a, b) -> {
+            Long timeA = (Long) a.get("capturedAt") != null ? (Long) a.get("capturedAt") : (Long) a.get("createdAt");
+            Long timeB = (Long) b.get("capturedAt") != null ? (Long) b.get("capturedAt") : (Long) b.get("createdAt");
+            if (timeA == null) timeA = 0L;
+            if (timeB == null) timeB = 0L;
+            return timeB.compareTo(timeA);
+        });
+        
+        return result;
+    }
 }

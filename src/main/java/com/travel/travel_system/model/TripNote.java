@@ -45,6 +45,15 @@ public class TripNote {
     @Column(name = "privacy_mode")
     private String privacyMode;
 
+    @Column(name = "coordinate_source")
+    private String coordinateSource;
+
+    @Column(name = "coord_type")
+    private String coordType;
+
+    @Column(name = "location_name")
+    private String locationName;
+
     @Column(name = "created_at")
     @CreationTimestamp
     private Date createdAt;

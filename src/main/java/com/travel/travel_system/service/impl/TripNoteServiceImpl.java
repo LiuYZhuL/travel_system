@@ -90,9 +90,30 @@ public class TripNoteServiceImpl implements TripNoteService {
         }
         if (latEnc != null) {
             note.setLatEnc(latEnc);
+            note.setCoordinateSource("MANUAL");
         }
         if (lngEnc != null) {
             note.setLngEnc(lngEnc);
+        }
+        note.setUpdatedAt(new Date());
+
+        return tripNoteRepository.save(note);
+    }
+
+    @Override
+    @Transactional
+    public TripNote updateLocation(Long noteId, Double lat, Double lng, String locationName, String coordType) {
+        TripNote note = tripNoteRepository.findById(noteId)
+                .orElseThrow(() -> new RuntimeException("笔记不存在，noteId: " + noteId));
+
+        if (lat != null && lng != null) {
+            note.setLatEnc(encodeDouble(lat));
+            note.setLngEnc(encodeDouble(lng));
+            note.setCoordinateSource("MANUAL");
+            note.setCoordType(coordType != null ? coordType : "GCJ02");
+        }
+        if (locationName != null) {
+            note.setLocationName(locationName);
         }
         note.setUpdatedAt(new Date());
 
@@ -114,5 +135,14 @@ public class TripNoteServiceImpl implements TripNoteService {
     @Override
     public long countByTrip(Long tripId) {
         return tripNoteRepository.countByTripId(tripId);
+    }
+
+    private byte[] encodeDouble(double value) {
+        long bits = Double.doubleToLongBits(value);
+        byte[] bytes = new byte[8];
+        for (int i = 0; i < 8; i++) {
+            bytes[i] = (byte) ((bits >> (i * 8)) & 0xFF);
+        }
+        return bytes;
     }
 }

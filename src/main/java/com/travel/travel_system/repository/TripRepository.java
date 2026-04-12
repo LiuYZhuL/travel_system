@@ -63,6 +63,13 @@ public interface TripRepository extends JpaRepository<Trip, Long>, JpaSpecificat
             Pageable pageable
     );
 
+    @Query("SELECT t FROM Trip t WHERE t.userId = :userId AND t.startTime BETWEEN :startTime AND :endTime ORDER BY t.startTime DESC")
+    List<Trip> findByUserIdAndStartTimeBetween(
+            @Param("userId") Long userId,
+            @Param("startTime") Date startTime,
+            @Param("endTime") Date endTime
+    );
+
     /**
      * 根据隐私模式查询行程
      */

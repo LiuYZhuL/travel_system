@@ -27,16 +27,16 @@ public class TripAiSummary {
     @Column(name = "trip_id")
     private Long tripId;
 
-    @Column(name = "overview")
+    @Column(name = "overview", columnDefinition = "LONGTEXT")
     private String overview;
 
-    @Column(name = "highlights")
+    @Column(name = "highlights", columnDefinition = "LONGTEXT")
     private String highlights;
 
-    @Column(name = "best_moment")
+    @Column(name = "best_moment", columnDefinition = "LONGTEXT")
     private String bestMoment;
 
-    @Column(name = "route_summary")
+    @Column(name = "route_summary", columnDefinition = "LONGTEXT")
     private String routeSummary;
 
     @Column(name = "model_name")

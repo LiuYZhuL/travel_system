@@ -18,6 +18,7 @@ import com.travel.travel_system.algorithm.model.*;
 import com.travel.travel_system.algorithm.model.RoadGraph;
 import com.travel.travel_system.algorithm.RoadGraphService;
 import com.travel.travel_system.algorithm.model.RoadSegment;
+import com.travel.travel_system.utils.GeoUtils;
 import com.travel.travel_system.vo.GeoPointVO;
 import com.travel.travel_system.vo.MapMarkerVO;
 import com.travel.travel_system.vo.TrackPolylineVO;
@@ -353,7 +354,7 @@ public class TrackPointServiceImpl implements TrackPointService {
 
             boolean closeInSpace = isValidCoordinate(lastLat, lastLng)
                     && isValidCoordinate(curLat, curLng)
-                    && haversineMetersStatic(lastLat, lastLng, curLat, curLng) <= 12.0;
+                    && GeoUtils.haversineMeters(lastLat, lastLng, curLat, curLng) <= 12.0;
 
             if (sameSegment && closeInTime && closeInSpace) {
                 if (sourcePriority(current) < sourcePriority(last)) {
@@ -1241,7 +1242,7 @@ public class TrackPointServiceImpl implements TrackPointService {
         for (TrackPoint point : points) {
             double pLat = decodeDouble(point.getLatEnc());
             double pLng = decodeDouble(point.getLngEnc());
-            double d = haversineMetersStatic(lat, lng, pLat, pLng);
+            double d = GeoUtils.haversineMeters(lat, lng, pLat, pLng);
             if (d < best) {
                 best = d;
             }
@@ -1308,7 +1309,7 @@ public class TrackPointServiceImpl implements TrackPointService {
             }
             double pLat = decodeDouble(point.getLatEnc());
             double pLng = decodeDouble(point.getLngEnc());
-            double d = haversineMetersStatic(lat, lng, pLat, pLng);
+            double d = GeoUtils.haversineMeters(lat, lng, pLat, pLng);
             if (d < bestDistance) {
                 bestDistance = d;
                 best = point;
@@ -1815,17 +1816,17 @@ public class TrackPointServiceImpl implements TrackPointService {
             if (sourceType != null && "GCJ02".equalsIgnoreCase(sourceType.name())) {
                 return new double[]{lat, lon};
             }
-            return wgs84ToGcj02(lat, lon);
+            return GeoUtils.wgs84ToGcj02(lat, lon);
         }
         if (sourceType != null && "GCJ02".equalsIgnoreCase(sourceType.name())) {
-            return gcj02ToWgs84(lat, lon);
+            return GeoUtils.gcj02ToWgs84(lat, lon);
         }
         return new double[]{lat, lon};
     }
 
     private double[] fromInternalWgs84ToDisplay(double lat, double lon, CoordTypeVO displayType) {
         if (displayType == CoordTypeVO.GCJ02) {
-            return wgs84ToGcj02(lat, lon);
+            return GeoUtils.wgs84ToGcj02(lat, lon);
         }
         return new double[]{lat, lon};
     }
@@ -2265,7 +2266,7 @@ public class TrackPointServiceImpl implements TrackPointService {
     private double[] toWgs84(double lat, double lon, CoordType coordType) {
         String type = coordType == null ? "" : coordType.name();
         if ("GCJ02".equalsIgnoreCase(type)) {
-            return gcj02ToWgs84(lat, lon);
+            return GeoUtils.gcj02ToWgs84(lat, lon);
         }
         return new double[]{lat, lon};
     }
@@ -2460,60 +2461,6 @@ public class TrackPointServiceImpl implements TrackPointService {
 
     private byte[] encodeDouble(double value) {
         return encodeDoubleStatic(value);
-    }
-
-    private static final double PI = Math.PI;
-    private static final double A = 6378245.0;
-    private static final double EE = 0.00669342162296594323;
-
-    private double[] wgs84ToGcj02(double lat, double lon) {
-        if (outOfChina(lat, lon)) {
-            return new double[]{lat, lon};
-        }
-        double[] delta = delta(lat, lon);
-        return new double[]{lat + delta[0], lon + delta[1]};
-    }
-
-    private double[] gcj02ToWgs84(double lat, double lon) {
-        if (outOfChina(lat, lon)) {
-            return new double[]{lat, lon};
-        }
-        double[] delta = delta(lat, lon);
-        double mgLat = lat + delta[0];
-        double mgLon = lon + delta[1];
-        return new double[]{lat * 2 - mgLat, lon * 2 - mgLon};
-    }
-
-    private boolean outOfChina(double lat, double lon) {
-        return lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271;
-    }
-
-    private double[] delta(double lat, double lon) {
-        double dLat = transformLat(lon - 105.0, lat - 35.0);
-        double dLon = transformLon(lon - 105.0, lat - 35.0);
-        double radLat = lat / 180.0 * PI;
-        double magic = Math.sin(radLat);
-        magic = 1 - EE * magic * magic;
-        double sqrtMagic = Math.sqrt(magic);
-        dLat = (dLat * 180.0) / ((A * (1 - EE)) / (magic * sqrtMagic) * PI);
-        dLon = (dLon * 180.0) / (A / sqrtMagic * Math.cos(radLat) * PI);
-        return new double[]{dLat, dLon};
-    }
-
-    private double transformLat(double x, double y) {
-        double ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
-        ret += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0;
-        ret += (20.0 * Math.sin(y * PI) + 40.0 * Math.sin(y / 3.0 * PI)) * 2.0 / 3.0;
-        ret += (160.0 * Math.sin(y / 12.0 * PI) + 320 * Math.sin(y * PI / 30.0)) * 2.0 / 3.0;
-        return ret;
-    }
-
-    private double transformLon(double x, double y) {
-        double ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
-        ret += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0;
-        ret += (20.0 * Math.sin(x * PI) + 40.0 * Math.sin(x / 3.0 * PI)) * 2.0 / 3.0;
-        ret += (150.0 * Math.sin(x / 12.0 * PI) + 300.0 * Math.sin(x / 30.0 * PI)) * 2.0 / 3.0;
-        return ret;
     }
 
     private void logWindowGraph(RoadGraphService.Window window, RoadGraph graph) {
@@ -2871,19 +2818,6 @@ public class TrackPointServiceImpl implements TrackPointService {
         return java.nio.ByteBuffer.wrap(java.util.Arrays.copyOf(bytes, 8))
                 .order(java.nio.ByteOrder.LITTLE_ENDIAN)
                 .getDouble();
-    }
-
-    public static double haversineMetersStatic(double lat1, double lon1, double lat2, double lon2) {
-        double rLat1 = Math.toRadians(lat1);
-        double rLon1 = Math.toRadians(lon1);
-        double rLat2 = Math.toRadians(lat2);
-        double rLon2 = Math.toRadians(lon2);
-        double dLat = rLat2 - rLat1;
-        double dLon = rLon2 - rLon1;
-        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
-                + Math.cos(rLat1) * Math.cos(rLat2)
-                * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-        return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
     public static class LatestMatchPayload {
