@@ -226,7 +226,25 @@ public class UserController extends BaseController {
      */
     @PatchMapping("/settings/privacy-mode")
     public ApiResponse<?> updateDefaultPrivacyMode(@RequestBody Map<String, Object> request, HttpServletRequest httpRequest) {
-        return error("SYSTEM_501", "更新默认隐私模式接口暂未实现");
+        try {
+            Long userId = (Long) httpRequest.getAttribute("userId");
+            if (userId == null) {
+                return error("AUTH_001", "未授权访问");
+            }
+
+            String defaultPrivacyMode = asString(request.get("defaultPrivacyMode"));
+            if (defaultPrivacyMode == null || defaultPrivacyMode.trim().isEmpty()) {
+                return error("PARAM_001", "默认隐私模式不能为空");
+            }
+
+            userService.updatePrivacySettings(userId, defaultPrivacyMode);
+
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("defaultPrivacyMode", defaultPrivacyMode.trim().toUpperCase());
+            return success(data);
+        } catch (Exception e) {
+            return error("SYSTEM_500", "更新默认隐私模式失败：" + e.getMessage());
+        }
     }
 
     /**

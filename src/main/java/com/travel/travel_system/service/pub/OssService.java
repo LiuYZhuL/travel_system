@@ -12,8 +12,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
 import java.util.UUID;
 
 @Service
@@ -126,5 +128,18 @@ public class OssService {
     public String generateFileName(String originalFilename, String folder) {
         String fileExtension = originalFilename.substring(originalFilename.lastIndexOf("."));
         return folder + "/" + UUID.randomUUID() + fileExtension;
+    }
+
+
+    /**
+     * 下载OSS文件到本地
+     */
+    public void downloadFile(String objectName, File localFile) {
+        try (OSSObject object = ossClient.getObject(bucketName, objectName);
+             InputStream inputStream = object.getObjectContent()) {
+            Files.copy(inputStream, localFile.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (Exception e) {
+            throw new RuntimeException("OSS下载失败: " + e.getMessage(), e);
+        }
     }
 }

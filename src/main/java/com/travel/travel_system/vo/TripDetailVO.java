@@ -18,6 +18,9 @@ public class TripDetailVO implements Serializable {
     private List<PlaceSummaryVO> places;
     private List<StoryBlockVO> storyBlocks;
     private TripAISummaryVO aiSummary;
+    private Boolean shareAllowed;
+    private String shareMode;
+    private String shareHint;
 
     @Data
     @Builder

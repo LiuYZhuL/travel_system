@@ -36,7 +36,8 @@ public class Trip {
     @Column(name = "timezone")
     private String timezone;
     
-    @Column(name = "summary_text")
+    @Lob
+    @Column(name = "summary_text", columnDefinition = "LONGTEXT")
     private String summaryText;
     
     @Column(name = "privacy_mode")

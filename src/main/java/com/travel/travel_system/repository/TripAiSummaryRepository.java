@@ -4,6 +4,7 @@ import com.travel.travel_system.model.TripAiSummary;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
+import java.util.List;
 import java.util.Optional;
 
 @Repository
@@ -13,6 +14,10 @@ public interface TripAiSummaryRepository extends JpaRepository<TripAiSummary, Lo
      * 根据行程 ID 查询 AI 总结
      */
     Optional<TripAiSummary> findByTripId(Long tripId);
+
+    Optional<TripAiSummary> findFirstByTripIdAndIsLatestTrueOrderByGeneratedAtDescIdDesc(Long tripId);
+
+    List<TripAiSummary> findByTripIdOrderByGeneratedAtDesc(Long tripId);
 
     /**
      * 根据用户 ID 和行程 ID 查询 AI 总结

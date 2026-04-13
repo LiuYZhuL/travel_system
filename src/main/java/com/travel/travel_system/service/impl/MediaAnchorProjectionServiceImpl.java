@@ -13,6 +13,7 @@ import com.travel.travel_system.repository.TripRepository;
 import com.travel.travel_system.repository.TripSegmentRepository;
 import com.travel.travel_system.repository.VideoRepository;
 import com.travel.travel_system.service.MediaAnchorProjectionService;
+import com.travel.travel_system.utils.GeoUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -172,8 +173,15 @@ public class MediaAnchorProjectionServiceImpl implements MediaAnchorProjectionSe
 
             // OUT_OF_TRIP 时可以保留原始坐标用于后续人工确认
             if (facts.hasCoord()) {
-                decision.lat = facts.lat;
-                decision.lng = facts.lng;
+                double wgs84Lat = facts.lat;
+                double wgs84Lng = facts.lng;
+                if (facts.coordType == CoordType.GCJ02) {
+                    double[] converted = GeoUtils.gcj02ToWgs84(facts.lat, facts.lng);
+                    wgs84Lat = converted[0];
+                    wgs84Lng = converted[1];
+                }
+                decision.lat = wgs84Lat;
+                decision.lng = wgs84Lng;
                 decision.confidence = 0.30f;
             }
             return decision;
@@ -226,8 +234,15 @@ public class MediaAnchorProjectionServiceImpl implements MediaAnchorProjectionSe
 
         // 3) 只有坐标，没有可用时间：保留原始坐标，等待后续人工确认或补时间
         if (facts.hasCoord()) {
-            decision.lat = facts.lat;
-            decision.lng = facts.lng;
+            double wgs84Lat = facts.lat;
+            double wgs84Lng = facts.lng;
+            if (facts.coordType == CoordType.GCJ02) {
+                double[] converted = GeoUtils.gcj02ToWgs84(facts.lat, facts.lng);
+                wgs84Lat = converted[0];
+                wgs84Lng = converted[1];
+            }
+            decision.lat = wgs84Lat;
+            decision.lng = wgs84Lng;
             decision.routeEligible = false;
             decision.projectionStatus = "PENDING";
             decision.confidence = facts.manualSource ? 0.75f : 0.50f;
@@ -249,7 +264,7 @@ public class MediaAnchorProjectionServiceImpl implements MediaAnchorProjectionSe
 
         // 空间靠近轨迹
         if (facts.hasCoord()) {
-            double distance = trackPointService.minDistanceToTrip(trip.getId(), facts.lat, facts.lng);
+            double distance = trackPointService.minDistanceToTrip(trip.getId(), facts.lat, facts.lng, facts.coordType);
             if (distance <= STRONG_NEAR_METERS) {
                 score += 0.35f;
             } else if (distance <= WEAK_NEAR_METERS) {

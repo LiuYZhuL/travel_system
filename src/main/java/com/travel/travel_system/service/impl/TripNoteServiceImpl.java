@@ -110,7 +110,7 @@ public class TripNoteServiceImpl implements TripNoteService {
             note.setLatEnc(encodeDouble(lat));
             note.setLngEnc(encodeDouble(lng));
             note.setCoordinateSource("MANUAL");
-            note.setCoordType(coordType != null ? coordType : "GCJ02");
+            note.setCoordType(coordType != null && !coordType.isBlank() ? coordType.trim().toUpperCase() : "GCJ02");
         }
         if (locationName != null) {
             note.setLocationName(locationName);

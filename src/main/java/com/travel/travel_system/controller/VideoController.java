@@ -26,6 +26,7 @@ public class VideoController extends BaseController {
                                       @RequestParam(required = false) Double lat,
                                       @RequestParam(required = false) Double lng,
                                       @RequestParam(required = false) String locationName,
+                                      @RequestParam(required = false) String coordType,
                                       @RequestParam MultipartFile file,
                                       HttpServletRequest httpRequest) {
         try {
@@ -36,9 +37,11 @@ public class VideoController extends BaseController {
             }
 
             Video video = videoService.uploadVideo(tripId, file, userCaption);
+            videoService.processVideoAsync(video.getId());
+            video = videoService.getVideo(video.getId());
 
             if (lat != null && lng != null) {
-                videoService.updateVideoAssistInfo(video.getId(), capturedAt, lat, lng, "GCJ02");
+                videoService.updateVideoAssistInfo(video.getId(), capturedAt, lat, lng, normalizeCoordType(coordType));
                 video = videoService.getVideo(video.getId());
             }
 
@@ -157,8 +160,16 @@ public class VideoController extends BaseController {
         vo.put("createdAt", DateTimeUtils.formatDateTime(video.getCreatedAt()));
         vo.put("processingStatus", video.getProcessingStatus() != null ? video.getProcessingStatus().name() : null);
         vo.put("captureCoordSource", video.getCaptureCoordSource());
+        vo.put("captureCoordType", video.getCaptureCoordType());
         vo.put("bindingStatus", video.getBindingStatus());
         return vo;
+    }
+
+    private String normalizeCoordType(String coordType) {
+        if (coordType == null || coordType.trim().isEmpty()) {
+            return "GCJ02";
+        }
+        return coordType.trim().toUpperCase();
     }
 
     private Long toLong(Object value) {

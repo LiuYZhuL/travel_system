@@ -103,7 +103,7 @@ public class PhotoServiceImpl implements PhotoService {
 
     @Override
     @Transactional
-    public Photo updatePhotoInfo(Long photoId, String userCaption, String privacyMode) {
+    public Photo updatePhotoInfo(Long photoId, String userCaption, String privacyMode, Boolean isCover) {
         Photo photo = photoRepository.findById(photoId)
                 .orElseThrow(() -> new RuntimeException("照片不存在，photoId: " + photoId));
 
@@ -115,6 +115,18 @@ public class PhotoServiceImpl implements PhotoService {
                 photo.setPrivacyMode(PrivacyMode.valueOf(privacyMode.toUpperCase()));
             } catch (IllegalArgumentException ignored) {
             }
+        }
+
+        if (isCover != null) {
+            if (Boolean.TRUE.equals(isCover)) {
+                for (Photo other : photoRepository.findByTripIdAndIsCoverTrue(photo.getTripId())) {
+                    if (!other.getId().equals(photo.getId())) {
+                        other.setIsCover(false);
+                        photoRepository.save(other);
+                    }
+                }
+            }
+            photo.setIsCover(isCover);
         }
 
         Photo saved = photoRepository.save(photo);

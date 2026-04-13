@@ -70,8 +70,12 @@ public class TripRouteSnapshotServiceImpl implements TripRouteSnapshotService {
         try {
             trackPointService.recomputeTripMatchIfNeeded(tripId);
             TripRouteSnapshotPayload payload = trackPointService.buildRouteSnapshotPayload(tripId);
-            if (payload.getMatchedResults() == null || payload.getMatchedResults().isEmpty()) {
-                throw new RuntimeException("最新路线快照为空，tripId=" + tripId);
+            boolean hasMatchedResults = payload.getMatchedResults() != null && !payload.getMatchedResults().isEmpty();
+
+            Optional<TripRouteSnapshot> existingOpt = tripRouteSnapshotRepository.findById(tripId);
+            if (!hasMatchedResults) {
+                log.info("[TRIP_ROUTE_SNAPSHOT] latest payload is empty, keep snapshot safe tripId={}", tripId);
+                return persistEmptySnapshot(tripId, payload, existingOpt.orElse(null));
             }
 
             byte[] jsonBytes = objectMapper.writeValueAsBytes(payload);
@@ -79,7 +83,6 @@ public class TripRouteSnapshotServiceImpl implements TripRouteSnapshotService {
             String contentHash = sha256Hex(gzipBytes);
             String objectName = buildLatestObjectName(payload);
 
-            Optional<TripRouteSnapshot> existingOpt = tripRouteSnapshotRepository.findById(tripId);
             if (existingOpt.isPresent()) {
                 TripRouteSnapshot existing = existingOpt.get();
                 if (payload.getFingerprint().equals(existing.getFingerprint())
@@ -217,5 +220,35 @@ public class TripRouteSnapshotServiceImpl implements TripRouteSnapshotService {
         } catch (Exception e) {
             log.warn("[TRIP_ROUTE_SNAPSHOT] release snapshot lock failed key={}: {}", lockKey, e.getMessage(), e);
         }
+    }
+
+    private TripRouteSnapshot persistEmptySnapshot(Long tripId,
+                                                   TripRouteSnapshotPayload payload,
+                                                   TripRouteSnapshot existing) {
+        if (existing != null && existing.getOssObjectKey() != null && !existing.getOssObjectKey().isBlank()) {
+            return existing;
+        }
+
+        TripRouteSnapshot snapshot = existing == null ? new TripRouteSnapshot() : existing;
+        Date now = new Date();
+        snapshot.setTripId(tripId);
+        snapshot.setRouteStatus("EMPTY");
+        snapshot.setAlgoVersion(payload.getAlgoVersion());
+        snapshot.setFingerprint(payload.getFingerprint());
+        snapshot.setPointCount(payload.getPointCount() == null ? 0 : payload.getPointCount());
+        snapshot.setStartTs(payload.getStartTs());
+        snapshot.setEndTs(payload.getEndTs());
+        snapshot.setOverviewPolylineJson(null);
+        snapshot.setOssObjectKey(null);
+        snapshot.setOssEtag(null);
+        snapshot.setContentHash(null);
+        snapshot.setGeneratedAt(new Date(
+                payload.getGeneratedAt() == null ? System.currentTimeMillis() : payload.getGeneratedAt()
+        ));
+        if (snapshot.getCreatedAt() == null) {
+            snapshot.setCreatedAt(now);
+        }
+        snapshot.setUpdatedAt(now);
+        return tripRouteSnapshotRepository.save(snapshot);
     }
 }

@@ -43,4 +43,10 @@ public interface AiService {
      * @return 行程建议
      */
     List<String> generateTripSuggestions(Long tripId);
+
+    Map<String, Object> regenerateTripSummary(Long tripId, String reason);
+
+    List<Map<String, Object>> getAiSummaryHistory(Long tripId);
+
+    Map<String, Object> rollbackAiSummary(Long tripId, Long summaryId);
 }

@@ -18,7 +18,7 @@ public class WebConfig implements WebMvcConfigurer {
         // 注册JWT拦截器，排除登录接口
         registry.addInterceptor(jwtInterceptor)
                 .addPathPatterns("/**")
-                .excludePathPatterns("/api/v1/auth/**");
+                .excludePathPatterns("/api/v1/auth/**", "/api/public/**");
     }
 
     // 在 WebConfig.java 中添加

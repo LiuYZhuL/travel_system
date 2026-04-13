@@ -11,13 +11,21 @@ import com.travel.travel_system.repository.VideoRepository;
 import com.travel.travel_system.service.MediaAnchorProjectionService;
 import com.travel.travel_system.service.VideoService;
 import com.travel.travel_system.service.pub.OssService;
+import org.bytedeco.javacv.FFmpegFrameGrabber;
+import org.bytedeco.javacv.Frame;
+import org.bytedeco.javacv.Java2DFrameConverter;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -166,7 +174,7 @@ public class VideoServiceImpl implements VideoService {
     }
 
     @Override
-    @Transactional
+    @Async("videoProcessExecutor")
     public void processVideoAsync(Long videoId) {
         Video video = videoRepository.findById(videoId)
                 .orElseThrow(() -> new RuntimeException("视频不存在，videoId: " + videoId));
@@ -174,18 +182,39 @@ public class VideoServiceImpl implements VideoService {
         video.setProcessingStatus(VideoProcessingStatus.PROCESSING);
         videoRepository.save(video);
 
+        Path tempVideoFile = null;
         try {
-            // TODO: 转码、抽帧、封面生成等
+            String suffix = ".mp4";
+            if (video.getObjectKey() != null) {
+                int dot = video.getObjectKey().lastIndexOf('.');
+                if (dot >= 0 && dot < video.getObjectKey().length() - 1) {
+                    suffix = video.getObjectKey().substring(dot);
+                }
+            }
+
+            byte[] videoBytes = ossService.getFileBytes(extractObjectName(video.getObjectKey()));
+            tempVideoFile = Files.createTempFile("video-process-", suffix);
+            Files.write(tempVideoFile, videoBytes);
+
+            generateAndUploadThumbnail(video, tempVideoFile.toFile());
+
             video.setProcessingStatus(VideoProcessingStatus.COMPLETED);
 
-            // 元数据完善后可以再次投影
             mediaAnchorProjectionService.projectVideoAnchor(videoId, video.getTripId());
         } catch (Exception e) {
             video.setProcessingStatus(VideoProcessingStatus.FAILED);
+        } finally {
+            if (tempVideoFile != null) {
+                try {
+                    Files.deleteIfExists(tempVideoFile);
+                } catch (Exception ignored) {
+                }
+            }
         }
 
         videoRepository.save(video);
     }
+
 
     @Override
     @Transactional
@@ -334,6 +363,62 @@ public class VideoServiceImpl implements VideoService {
             }
         }
     }
+
+    private void generateAndUploadThumbnail(Video video, File videoFile) {
+        FFmpegFrameGrabber grabber = null;
+        try {
+            grabber = new FFmpegFrameGrabber(videoFile);
+            grabber.start();
+
+            int totalFrames = grabber.getLengthInFrames();
+            int targetFrame = Math.max(totalFrames / 3, 1);
+
+            Frame frame = null;
+            for (int i = 0; i <= targetFrame; i++) {
+                frame = grabber.grabImage();
+                if (frame == null) {
+                    break;
+                }
+            }
+
+            if (frame != null) {
+                Java2DFrameConverter converter = new Java2DFrameConverter();
+                BufferedImage bufferedImage = converter.convert(frame);
+
+                if (bufferedImage != null) {
+                    int width = bufferedImage.getWidth();
+                    int height = bufferedImage.getHeight();
+
+                    int thumbWidth = 320;
+                    int thumbHeight = (int) ((double) height / width * thumbWidth);
+
+                    BufferedImage thumbnail = new BufferedImage(thumbWidth, thumbHeight, BufferedImage.TYPE_INT_RGB);
+                    thumbnail.getGraphics().drawImage(bufferedImage.getScaledInstance(thumbWidth, thumbHeight, java.awt.Image.SCALE_SMOOTH), 0, 0, null);
+
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                    ImageIO.write(thumbnail, "jpg", baos);
+                    byte[] thumbnailBytes = baos.toByteArray();
+
+                    String thumbnailObjectKey = ossService.generateFileName("thumbnail.jpg", "thumbnails/" + video.getTripId());
+                    String thumbnailUrl = ossService.uploadFile(thumbnailBytes, thumbnailObjectKey);
+
+                    video.setThumbnailObjectKey(thumbnailUrl);
+                }
+            }
+
+            grabber.stop();
+        } catch (Exception e) {
+            throw new RuntimeException("生成视频缩略图失败: " + e.getMessage(), e);
+        } finally {
+            if (grabber != null) {
+                try {
+                    grabber.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
     private Date parseCreationTimeFromTags(JsonNode tagsNode) {
         if (tagsNode == null || tagsNode.isMissingNode() || tagsNode.isNull()) {
             return null;

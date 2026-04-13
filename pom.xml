@@ -125,7 +125,7 @@
             <artifactId>fastjson</artifactId>
             <version>2.0.44</version>
         </dependency>
-        
+
         <!-- AspectJ依赖 -->
         <dependency>
             <groupId>org.aspectj</groupId>
@@ -164,6 +164,18 @@
             <groupId>com.drewnoakes</groupId>
             <artifactId>metadata-extractor</artifactId>
             <version>2.19.0</version>
+        </dependency>
+
+        <!-- 精简版：只包含 Windows 64位 -->
+        <dependency>
+            <groupId>org.bytedeco</groupId>
+            <artifactId>javacv</artifactId>
+            <version>1.5.9</version>
+        </dependency>
+        <dependency>
+            <groupId>org.bytedeco</groupId>
+            <artifactId>ffmpeg-platform</artifactId>
+            <version>6.0-1.5.9</version>
         </dependency>
     </dependencies>
 

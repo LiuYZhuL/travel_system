@@ -14,4 +14,9 @@ public class HeatmapPointVO implements Serializable {
     private Double lat;
     private Double lng;
     private Integer weight;
+    private String coordType;
+    private String semanticTitle;
+    private String semanticAddress;
+    private String city;
+    private String district;
 }

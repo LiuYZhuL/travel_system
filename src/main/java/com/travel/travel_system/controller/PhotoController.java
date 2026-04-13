@@ -33,12 +33,17 @@ public class PhotoController extends BaseController {
             Long tripId = toLong(request.get("tripId"));
             String fileBase64 = asString(request.get("fileBase64"));
             String fileName = asString(request.get("fileName"));
+            String userCaption = asString(request.get("userCaption"));
+            Boolean isCover = asBoolean(request.get("isCover"));
 
             if (tripId == null || fileBase64 == null || fileBase64.isEmpty()) {
                 return error("VALID_001", "tripId 和 fileBase64 不能为空");
             }
 
             Photo photo = photoService.uploadPhoto(tripId, fileName != null ? fileName : "photo.jpg", "image/jpeg", fileBase64);
+            if ((userCaption != null && !userCaption.trim().isEmpty()) || isCover != null) {
+                photo = photoService.updatePhotoInfo(photo.getId(), userCaption, null, isCover);
+            }
             return success(toPhotoVO(photo));
         } catch (Exception e) {
             return error("SYSTEM_500", "上传照片失败：" + e.getMessage());
@@ -48,10 +53,12 @@ public class PhotoController extends BaseController {
     @PostMapping("/upload")
     public ApiResponse<?> uploadPhotoMultipart(@RequestParam Long tripId,
                                                @RequestParam(required = false) String userCaption,
+                                               @RequestParam(required = false) Boolean isCover,
                                                @RequestParam(required = false) Long capturedAt,
                                                @RequestParam(required = false) Double lat,
                                                @RequestParam(required = false) Double lng,
                                                @RequestParam(required = false) String locationName,
+                                               @RequestParam(required = false) String coordType,
                                                @RequestParam MultipartFile file,
                                                HttpServletRequest httpRequest) {
         try {
@@ -65,12 +72,12 @@ public class PhotoController extends BaseController {
             Photo photo = photoService.uploadPhoto(tripId, file.getOriginalFilename(), file.getContentType(), base64);
 
             if (lat != null && lng != null) {
-                photoService.updatePhotoAssistInfo(photo.getId(), capturedAt, lat, lng, "GCJ02");
+                photoService.updatePhotoAssistInfo(photo.getId(), capturedAt, lat, lng, normalizeCoordType(coordType));
                 photo = photoService.getPhotoAnchor(photo.getId());
             }
 
-            if (userCaption != null && !userCaption.trim().isEmpty()) {
-                photoService.updatePhotoInfo(photo.getId(), userCaption, null);
+            if ((userCaption != null && !userCaption.trim().isEmpty()) || isCover != null) {
+                photo = photoService.updatePhotoInfo(photo.getId(), userCaption, null, isCover);
             }
 
             return success(toPhotoVO(photo));
@@ -100,8 +107,9 @@ public class PhotoController extends BaseController {
             Long userId = requireUserId(httpRequest);
             String userCaption = asString(request.get("userCaption"));
             String privacyMode = asString(request.get("privacyMode"));
+            Boolean isCover = asBoolean(request.get("isCover"));
 
-            Photo photo = photoService.updatePhotoInfo(photoId, userCaption, privacyMode);
+            Photo photo = photoService.updatePhotoInfo(photoId, userCaption, privacyMode, isCover);
             return success(toPhotoVO(photo));
         } catch (Exception e) {
             return error("SYSTEM_500", "更新照片信息失败：" + e.getMessage());
@@ -162,8 +170,17 @@ public class PhotoController extends BaseController {
         vo.put("shotTime", DateTimeUtils.formatDateTime(photo.getShotTimeExif()));
         vo.put("createdAt", DateTimeUtils.formatDateTime(photo.getCreatedAt()));
         vo.put("captureCoordSource", photo.getCaptureCoordSource());
+        vo.put("captureCoordType", photo.getCaptureCoordType());
         vo.put("bindingStatus", photo.getBindingStatus());
+        vo.put("isCover", photo.getIsCover());
         return vo;
+    }
+
+    private String normalizeCoordType(String coordType) {
+        if (coordType == null || coordType.trim().isEmpty()) {
+            return "GCJ02";
+        }
+        return coordType.trim().toUpperCase();
     }
 
     private Long toLong(Object value) {
@@ -176,6 +193,12 @@ public class PhotoController extends BaseController {
         if (value == null) return null;
         if (value instanceof Number number) return number.doubleValue();
         try { return Double.parseDouble(String.valueOf(value)); } catch (NumberFormatException e) { return null; }
+    }
+
+    private Boolean asBoolean(Object value) {
+        if (value == null) return null;
+        if (value instanceof Boolean bool) return bool;
+        return Boolean.parseBoolean(String.valueOf(value));
     }
 
     private String asString(Object value) {

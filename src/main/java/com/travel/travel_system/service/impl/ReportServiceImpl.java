@@ -95,7 +95,7 @@ public class ReportServiceImpl implements ReportService {
                 .collect(Collectors.toList());
         report.put("storyBlocks", storyBlocks);
 
-        tripAiSummaryRepository.findByTripId(tripId).ifPresent(aiSummary -> {
+        tripAiSummaryRepository.findFirstByTripIdAndIsLatestTrueOrderByGeneratedAtDescIdDesc(tripId).ifPresent(aiSummary -> {
             Map<String, Object> aiSummaryMap = new LinkedHashMap<>();
             aiSummaryMap.put("overview", aiSummary.getOverview());
             aiSummaryMap.put("highlights", aiSummary.getHighlights() != null 

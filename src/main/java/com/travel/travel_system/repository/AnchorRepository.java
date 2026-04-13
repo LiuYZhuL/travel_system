@@ -77,4 +77,16 @@ public interface AnchorRepository extends JpaRepository<Anchor, Long> {
         @Param("mediaId") Long mediaId,
         @Param("type") String type
     );
+
+    @Query(value = "SELECT * FROM anchor WHERE user_id = :userId AND projection_status IN :statuses AND lat_enc IS NOT NULL AND lng_enc IS NOT NULL", nativeQuery = true)
+    List<Anchor> findByUserIdAndProjectionStatusInWithCoords(
+            @Param("userId") Long userId,
+            @Param("statuses") List<String> statuses
+    );
+
+    @Query(value = "SELECT * FROM anchor WHERE trip_id = :tripId AND projection_status IN :statuses AND lat_enc IS NOT NULL AND lng_enc IS NOT NULL", nativeQuery = true)
+    List<Anchor> findByTripIdAndProjectionStatusInWithCoords(
+            @Param("tripId") Long tripId,
+            @Param("statuses") List<String> statuses
+    );
 }

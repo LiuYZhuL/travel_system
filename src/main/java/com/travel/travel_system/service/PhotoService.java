@@ -29,7 +29,7 @@ public interface PhotoService {
      */
     List<Photo> getPhotosByTrip(Long tripId);
 
-    Photo updatePhotoInfo(Long photoId, String userCaption, String privacyMode);
+    Photo updatePhotoInfo(Long photoId, String userCaption, String privacyMode, Boolean isCover);
 
     void deletePhoto(Long photoId);
     Photo updatePhotoAssistInfo(Long photoId, Long captureTsOverride, Double manualLat, Double manualLng, String coordType);

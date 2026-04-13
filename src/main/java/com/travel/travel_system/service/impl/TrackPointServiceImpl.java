@@ -1234,15 +1234,28 @@ public class TrackPointServiceImpl implements TrackPointService {
     }
 
     public double minDistanceToTrip(Long tripId, Double lat, Double lng) {
+        return minDistanceToTrip(tripId, lat, lng, CoordType.WGS84);
+    }
+
+    public double minDistanceToTrip(Long tripId, Double lat, Double lng, CoordType coordType) {
         if (lat == null || lng == null) {
             return Double.MAX_VALUE;
         }
+
+        double wgs84Lat = lat;
+        double wgs84Lng = lng;
+        if (coordType == CoordType.GCJ02) {
+            double[] converted = GeoUtils.gcj02ToWgs84(lat, lng);
+            wgs84Lat = converted[0];
+            wgs84Lng = converted[1];
+        }
+
         List<TrackPoint> points = trackPointRepository.findByTripIdAndRenderEligibleOrderByTsAsc(tripId, true);
         double best = Double.MAX_VALUE;
         for (TrackPoint point : points) {
             double pLat = decodeDouble(point.getLatEnc());
             double pLng = decodeDouble(point.getLngEnc());
-            double d = GeoUtils.haversineMeters(lat, lng, pLat, pLng);
+            double d = GeoUtils.haversineMeters(wgs84Lat, wgs84Lng, pLat, pLng);
             if (d < best) {
                 best = d;
             }
@@ -1296,6 +1309,14 @@ public class TrackPointServiceImpl implements TrackPointService {
             return result;
         }
 
+        double wgs84Lat = lat;
+        double wgs84Lng = lng;
+        if (coordType == CoordType.GCJ02) {
+            double[] converted = GeoUtils.gcj02ToWgs84(lat, lng);
+            wgs84Lat = converted[0];
+            wgs84Lng = converted[1];
+        }
+
         List<TrackPoint> points = trackPointRepository.findByTripIdAndRenderEligibleOrderByTsAsc(tripId, true);
         TrackPoint best = null;
         double bestDistance = Double.MAX_VALUE;
@@ -1309,7 +1330,7 @@ public class TrackPointServiceImpl implements TrackPointService {
             }
             double pLat = decodeDouble(point.getLatEnc());
             double pLng = decodeDouble(point.getLngEnc());
-            double d = GeoUtils.haversineMeters(lat, lng, pLat, pLng);
+            double d = GeoUtils.haversineMeters(wgs84Lat, wgs84Lng, pLat, pLng);
             if (d < bestDistance) {
                 bestDistance = d;
                 best = point;
@@ -1327,8 +1348,8 @@ public class TrackPointServiceImpl implements TrackPointService {
                 result.setRouteEligible(true);
                 result.setConfidence(0.85f);
             } else {
-                result.setLat(lat);
-                result.setLng(lng);
+                result.setLat(wgs84Lat);  // ✅ 使用转换后的 WGS84 坐标
+                result.setLng(wgs84Lng);
                 result.setRouteEligible(false);
                 result.setConfidence(0.55f);
             }

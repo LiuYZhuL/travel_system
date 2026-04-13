@@ -45,6 +45,12 @@ public class TripAiSummary {
     @Column(name = "version")
     private String version;
 
+    @Column(name = "is_latest")
+    private Boolean isLatest = true;
+
+    @Column(name = "regenerate_reason", length = 500)
+    private String regenerateReason;
+
     @Column(name = "generated_at")
     private Date generatedAt;
 

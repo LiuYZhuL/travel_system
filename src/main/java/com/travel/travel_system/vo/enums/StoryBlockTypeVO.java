@@ -2,6 +2,7 @@ package com.travel.travel_system.vo.enums;
 
 public enum StoryBlockTypeVO {
     TEXT,
+    NOTE,
     PHOTO,
     VIDEO,
     PHOTO_TEXT,

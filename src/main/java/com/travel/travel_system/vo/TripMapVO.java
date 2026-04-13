@@ -43,6 +43,9 @@ public class TripMapVO implements Serializable {
      * 媒体锚点 marker（照片/视频）
      */
     private List<MapMarkerVO> mediaMarkers;
+    private String routeSource;
+    private String routeSyncStatus;
+    private String routeGeneratedAt;
 
     @Data
     @Builder

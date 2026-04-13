@@ -1,8 +1,11 @@
 package com.travel.travel_system.service.impl;
 
+import com.travel.travel_system.model.Anchor;
 import com.travel.travel_system.model.TrackPoint;
+import com.travel.travel_system.repository.AnchorRepository;
 import com.travel.travel_system.repository.TrackPointRepository;
 import com.travel.travel_system.service.HeatmapService;
+import com.travel.travel_system.service.ReverseGeocodingService;
 import com.travel.travel_system.utils.GeoUtils;
 import com.travel.travel_system.vo.HeatmapPointVO;
 import com.travel.travel_system.vo.UserHeatmapVO;
@@ -10,6 +13,7 @@ import com.travel.travel_system.vo.enums.HeatmapScopeVO;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -41,17 +45,23 @@ public class HeatmapServiceImpl implements HeatmapService {
     private static final long CACHE_TTL_MILLIS = TimeUnit.MINUTES.toMillis(10);
     private static final int USER_CACHE_MAX_ENTRIES = 64;
     private static final int TRIP_CACHE_MAX_ENTRIES = 128;
+    private static final int MAX_SEMANTIC_POINTS = 24;
     private static final double MAX_ACCEPTABLE_ACCURACY_M = 150.0;
     private static final double STAY_DISTANCE_M = 30.0;
+    private static final double SEMANTIC_MERGE_DISTANCE_M = 280.0;
 
-    private final TrackPointRepository trackPointRepository;
+    @Autowired
+    private TrackPointRepository trackPointRepository;
+
+    @Autowired
+    private AnchorRepository anchorRepository;
+
+    @Autowired
+    private ReverseGeocodingService reverseGeocodingService;
 
     private final Map<String, CacheEntry<UserHeatmapVO>> userCache = synchronizedLruMap(USER_CACHE_MAX_ENTRIES);
     private final Map<String, CacheEntry<List<HeatmapPointVO>>> tripCache = synchronizedLruMap(TRIP_CACHE_MAX_ENTRIES);
 
-    public HeatmapServiceImpl(TrackPointRepository trackPointRepository) {
-        this.trackPointRepository = trackPointRepository;
-    }
 
     @PostConstruct
     void init() {
@@ -71,13 +81,20 @@ public class HeatmapServiceImpl implements HeatmapService {
         }
 
         TimeRange timeRange = resolveTimeRange(normalizedScope);
-        List<TrackPoint> sourcePoints = trackPointRepository.findByUserIdAndTimeRange(
+        List<TrackPoint> trackPoints = trackPointRepository.findByUserIdAndTimeRange(
                 userId,
                 timeRange.startTs,
                 timeRange.endTs
         );
 
-        List<HeatmapPointVO> heatPoints = aggregateHeatmapPoints(sourcePoints, normalizedGrid);
+        List<Anchor> anchors = anchorRepository.findByUserIdAndProjectionStatusInWithCoords(
+                userId,
+                List.of("PROJECTED", "MANUAL_FIXED")
+        );
+
+        List<DecodedPoint> mergedPoints = mergeTrackPointsAndAnchors(trackPoints, anchors);
+        List<HeatmapPointVO> heatPoints = aggregateHeatmapPointsFromDecoded(mergedPoints, normalizedGrid);
+
         UserHeatmapVO result = UserHeatmapVO.builder()
                 .userId(userId)
                 .scope(resolveScopeEnum(normalizedScope))
@@ -99,8 +116,14 @@ public class HeatmapServiceImpl implements HeatmapService {
             return deepCopyPoints(cached.value);
         }
 
-        List<TrackPoint> sourcePoints = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
-        List<HeatmapPointVO> heatPoints = aggregateHeatmapPoints(sourcePoints, normalizedGrid);
+        List<TrackPoint> trackPoints = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
+        List<Anchor> anchors = anchorRepository.findByTripIdAndProjectionStatusInWithCoords(
+                tripId,
+                List.of("PROJECTED", "MANUAL_FIXED")
+        );
+
+        List<DecodedPoint> mergedPoints = mergeTrackPointsAndAnchors(trackPoints, anchors);
+        List<HeatmapPointVO> heatPoints = aggregateHeatmapPointsFromDecoded(mergedPoints, normalizedGrid);
 
         tripCache.put(cacheKey, new CacheEntry<>(deepCopyPoints(heatPoints), System.currentTimeMillis() + CACHE_TTL_MILLIS));
         return heatPoints;
@@ -121,6 +144,139 @@ public class HeatmapServiceImpl implements HeatmapService {
         }
         tripCache.keySet().removeIf(key -> key.startsWith("trip:" + tripId + ":"));
     }
+
+
+    private List<DecodedPoint> mergeTrackPointsAndAnchors(List<TrackPoint> trackPoints, List<Anchor> anchors) {
+        List<DecodedPoint> result = new ArrayList<>();
+
+        if (trackPoints != null) {
+            for (TrackPoint point : trackPoints) {
+                if (point == null || point.getLatEnc() == null || point.getLngEnc() == null || point.getTs() == null) {
+                    continue;
+                }
+                if (point.getAccuracyM() != null && point.getAccuracyM() > MAX_ACCEPTABLE_ACCURACY_M) {
+                    continue;
+                }
+
+                double lat = bytesToDouble(point.getLatEnc());
+                double lng = bytesToDouble(point.getLngEnc());
+
+                if (!isValidCoordinate(lat, lng)) {
+                    continue;
+                }
+
+                double normalizedLat;
+                double normalizedLng;
+
+                if (point.getRawCoordType() == com.travel.travel_system.model.enums.CoordType.GCJ02) {
+                    double[] converted = GeoUtils.gcj02ToWgs84(lat, lng);
+                    normalizedLat = converted[0];
+                    normalizedLng = converted[1];
+                } else {
+                    normalizedLat = lat;
+                    normalizedLng = lng;
+                }
+
+                result.add(new DecodedPoint(point.getTripId(), point.getTs(), normalizedLat, normalizedLng));
+            }
+        }
+
+        if (anchors != null) {
+            for (Anchor anchor : anchors) {
+                if (anchor.getLatEnc() == null || anchor.getLngEnc() == null) {
+                    continue;
+                }
+
+                Long ts = anchor.getMatchedTs() != null ? anchor.getMatchedTs() : anchor.getMediaTs();
+                if (ts == null) {
+                    continue;
+                }
+
+                double lat = bytesToDouble(anchor.getLatEnc());
+                double lng = bytesToDouble(anchor.getLngEnc());
+
+                if (!isValidCoordinate(lat, lng)) {
+                    continue;
+                }
+
+                result.add(new DecodedPoint(anchor.getTripId(), ts, lat, lng));
+            }
+        }
+
+        result.sort(Comparator.comparingLong(p -> p.ts));
+        return thinIfNecessary(result);
+    }
+
+
+    private List<HeatmapPointVO> aggregateHeatmapPointsFromDecoded(List<DecodedPoint> points, int gridMeters) {
+        if (points == null || points.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        Map<String, HeatCell> cells = new LinkedHashMap<>();
+        DecodedPoint prev = null;
+
+        for (DecodedPoint point : points) {
+            GridIndex grid = toGrid(point.lat, point.lng, gridMeters);
+            String key = grid.key();
+            HeatCell cell = cells.computeIfAbsent(key, k -> new HeatCell(grid.centerLat(gridMeters), grid.centerLng(gridMeters)));
+
+            cell.addPoint(point);
+            cell.sampleCount += 1;
+            cell.weightScore += 1.0;
+            if (point.tripId != null) {
+                cell.tripIds.add(point.tripId);
+            }
+
+            if (prev != null) {
+                long dtSec = Math.max(0L, (point.ts - prev.ts) / 1000L);
+                if (dtSec > 0) {
+                    dtSec = Math.min(dtSec, MAX_DT_SEC);
+                    double dist = GeoUtils.haversineMeters(prev.lat, prev.lng, point.lat, point.lng);
+                    if (dist <= STAY_DISTANCE_M) {
+                        cell.staySec += dtSec;
+                        cell.weightScore += Math.min(6.0, dtSec / 20.0);
+                    } else {
+                        cell.weightScore += Math.min(2.0, dtSec / 120.0);
+                    }
+                }
+            }
+
+            prev = point;
+        }
+
+        List<HeatmapPointVO> result = new ArrayList<>(cells.size());
+        for (HeatCell cell : cells.values()) {
+            int weight = normalizeWeight(cell);
+            if (weight <= 0) {
+                continue;
+            }
+            double[] displayCoord = GeoUtils.wgs84ToGcj02(cell.centerLat, cell.centerLng);
+            result.add(HeatmapPointVO.builder()
+                    .lat(round6(displayCoord[0]))
+                    .lng(round6(displayCoord[1]))
+                    .weight(weight)
+                    .coordType("GCJ02")
+                    .build());
+        }
+
+        result.sort((a, b) -> Integer.compare(
+                b.getWeight() != null ? b.getWeight() : 0,
+                a.getWeight() != null ? a.getWeight() : 0
+        ));
+
+        List<HeatmapPointVO> limited = result.size() > MAX_OUTPUT_POINTS
+                ? new ArrayList<>(result.subList(0, MAX_OUTPUT_POINTS))
+                : result;
+        enrichSemanticLabels(limited);
+        List<HeatmapPointVO> merged = mergeSemanticHotspots(limited);
+        merged.sort((a, b) -> Integer.compare(
+                b.getWeight() != null ? b.getWeight() : 0,
+                a.getWeight() != null ? a.getWeight() : 0
+        ));
+        return merged;
+    }
+
 
     private List<HeatmapPointVO> aggregateHeatmapPoints(List<TrackPoint> rawPoints, int gridMeters) {
         if (rawPoints == null || rawPoints.isEmpty()) {
@@ -173,10 +329,12 @@ public class HeatmapServiceImpl implements HeatmapService {
             if (weight <= 0) {
                 continue;
             }
+            double[] displayCoord = GeoUtils.wgs84ToGcj02(cell.centerLat, cell.centerLng);
             result.add(HeatmapPointVO.builder()
-                    .lat(round6(cell.centerLat))
-                    .lng(round6(cell.centerLng))
+                    .lat(round6(displayCoord[0]))
+                    .lng(round6(displayCoord[1]))
                     .weight(weight)
+                    .coordType("GCJ02")
                     .build());
         }
 
@@ -185,10 +343,16 @@ public class HeatmapServiceImpl implements HeatmapService {
                 a.getWeight() != null ? a.getWeight() : 0
         ));
 
-        if (result.size() > MAX_OUTPUT_POINTS) {
-            return new ArrayList<>(result.subList(0, MAX_OUTPUT_POINTS));
-        }
-        return result;
+        List<HeatmapPointVO> limited = result.size() > MAX_OUTPUT_POINTS
+                ? new ArrayList<>(result.subList(0, MAX_OUTPUT_POINTS))
+                : result;
+        enrichSemanticLabels(limited);
+        List<HeatmapPointVO> merged = mergeSemanticHotspots(limited);
+        merged.sort((a, b) -> Integer.compare(
+                b.getWeight() != null ? b.getWeight() : 0,
+                a.getWeight() != null ? a.getWeight() : 0
+        ));
+        return merged;
     }
 
     private List<DecodedPoint> decodeAndClean(List<TrackPoint> rawPoints) {
@@ -204,22 +368,185 @@ public class HeatmapServiceImpl implements HeatmapService {
 
             double lat = bytesToDouble(point.getLatEnc());
             double lng = bytesToDouble(point.getLngEnc());
+
             if (!isValidCoordinate(lat, lng)) {
                 continue;
+            }
+
+            // 统一归一到 WGS84 做聚合，最终输出再转成 GCJ02 给前端和高德语义使用。
+            double normalizedLat;
+            double normalizedLng;
+
+            if (point.getRawCoordType() == com.travel.travel_system.model.enums.CoordType.GCJ02) {
+                double[] converted = GeoUtils.gcj02ToWgs84(lat, lng);
+                normalizedLat = converted[0];
+                normalizedLng = converted[1];
+            } else {
+                normalizedLat = lat;
+                normalizedLng = lng;
             }
 
             long ts = point.getTs();
             if (ts == lastTs && !decoded.isEmpty()) {
                 DecodedPoint prev = decoded.get(decoded.size() - 1);
-                if (GeoUtils.haversineMeters(prev.lat, prev.lng, lat, lng) < 3.0) {
+                if (GeoUtils.haversineMeters(prev.lat, prev.lng, normalizedLat, normalizedLng) < 3.0) {
                     continue;
                 }
             }
 
-            decoded.add(new DecodedPoint(point.getTripId(), ts, lat, lng));
+            decoded.add(new DecodedPoint(point.getTripId(), ts, normalizedLat, normalizedLng));
             lastTs = ts;
         }
         return decoded;
+    }
+
+    private void enrichSemanticLabels(List<HeatmapPointVO> points) {
+        if (points == null || points.isEmpty()) {
+            return;
+        }
+
+        int enrichCount = Math.min(MAX_SEMANTIC_POINTS, points.size());
+        for (int i = 0; i < enrichCount; i++) {
+            HeatmapPointVO point = points.get(i);
+            if (point == null || point.getLat() == null || point.getLng() == null) {
+                continue;
+            }
+            try {
+                reverseGeocodingService.reverseGeocode(point.getLat(), point.getLng())
+                        .ifPresent(result -> applySemanticFields(point, result));
+            } catch (Exception e) {
+                log.debug("Heatmap reverse geocode failed, lat={}, lng={}, error={}",
+                        point.getLat(), point.getLng(), e.getMessage());
+            }
+        }
+    }
+
+    private void applySemanticFields(HeatmapPointVO point, ReverseGeocodingService.ReverseGeocodingResult result) {
+        if (point == null || result == null) {
+            return;
+        }
+        point.setSemanticTitle(firstNonBlank(
+                result.poiName(),
+                result.getDisplayLocation(),
+                result.formattedAddress(),
+                result.district(),
+                result.getDisplayCity()
+        ));
+        point.setSemanticAddress(firstNonBlank(
+                joinAddress(result.getDisplayCity(), result.district(), joinAddress(result.street(), result.streetNumber())),
+                result.formattedAddress(),
+                joinAddress(result.province(), result.getDisplayCity(), result.district())
+        ));
+        point.setCity(blankToNull(result.getDisplayCity()));
+        point.setDistrict(blankToNull(result.district()));
+    }
+
+    private List<HeatmapPointVO> mergeSemanticHotspots(List<HeatmapPointVO> points) {
+        if (points == null || points.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<HeatmapPointVO> merged = new ArrayList<>();
+        for (HeatmapPointVO point : points) {
+            if (point == null) {
+                continue;
+            }
+            String mergeKey = buildSemanticMergeKey(point);
+            HeatmapPointVO target = null;
+            if (mergeKey != null) {
+                for (HeatmapPointVO candidate : merged) {
+                    if (!Objects.equals(buildSemanticMergeKey(candidate), mergeKey)) {
+                        continue;
+                    }
+                    if (candidate.getLat() == null || candidate.getLng() == null
+                            || point.getLat() == null || point.getLng() == null) {
+                        continue;
+                    }
+                    double distance = GeoUtils.haversineMeters(
+                            candidate.getLat(), candidate.getLng(),
+                            point.getLat(), point.getLng()
+                    );
+                    if (distance <= SEMANTIC_MERGE_DISTANCE_M) {
+                        target = candidate;
+                        break;
+                    }
+                }
+            }
+
+            if (target == null) {
+                merged.add(copyPoint(point));
+                continue;
+            }
+
+            mergePointInto(target, point);
+        }
+        return merged;
+    }
+
+    private String buildSemanticMergeKey(HeatmapPointVO point) {
+        if (point == null) {
+            return null;
+        }
+        String title = normalizeSemanticKey(firstNonBlank(point.getSemanticTitle(), point.getSemanticAddress()));
+        if (title == null) {
+            return null;
+        }
+        String region = normalizeSemanticKey(firstNonBlank(point.getDistrict(), point.getCity()));
+        return region == null ? title : title + "|" + region;
+    }
+
+    private String normalizeSemanticKey(String value) {
+        String normalized = blankToNull(value);
+        if (normalized == null) {
+            return null;
+        }
+        return normalized
+                .replace("（", "(")
+                .replace("）", ")")
+                .replaceAll("\\s+", "")
+                .toLowerCase(Locale.ROOT);
+    }
+
+    private HeatmapPointVO copyPoint(HeatmapPointVO source) {
+        if (source == null) {
+            return null;
+        }
+        return HeatmapPointVO.builder()
+                .lat(source.getLat())
+                .lng(source.getLng())
+                .weight(source.getWeight())
+                .coordType(source.getCoordType())
+                .semanticTitle(source.getSemanticTitle())
+                .semanticAddress(source.getSemanticAddress())
+                .city(source.getCity())
+                .district(source.getDistrict())
+                .build();
+    }
+
+    private void mergePointInto(HeatmapPointVO target, HeatmapPointVO incoming) {
+        if (target == null || incoming == null) {
+            return;
+        }
+
+        int targetWeight = target.getWeight() != null ? target.getWeight() : 0;
+        int incomingWeight = incoming.getWeight() != null ? incoming.getWeight() : 0;
+        int totalWeight = targetWeight + incomingWeight;
+
+        if (totalWeight > 0
+                && target.getLat() != null && target.getLng() != null
+                && incoming.getLat() != null && incoming.getLng() != null) {
+            double mergedLat = ((target.getLat() * targetWeight) + (incoming.getLat() * incomingWeight)) / totalWeight;
+            double mergedLng = ((target.getLng() * targetWeight) + (incoming.getLng() * incomingWeight)) / totalWeight;
+            target.setLat(round6(mergedLat));
+            target.setLng(round6(mergedLng));
+        }
+
+        target.setWeight(totalWeight);
+        target.setCoordType(firstNonBlank(target.getCoordType(), incoming.getCoordType(), "GCJ02"));
+        target.setSemanticTitle(firstNonBlank(target.getSemanticTitle(), incoming.getSemanticTitle()));
+        target.setSemanticAddress(firstNonBlank(target.getSemanticAddress(), incoming.getSemanticAddress()));
+        target.setCity(firstNonBlank(target.getCity(), incoming.getCity()));
+        target.setDistrict(firstNonBlank(target.getDistrict(), incoming.getDistrict()));
     }
 
     private List<DecodedPoint> thinIfNecessary(List<DecodedPoint> points) {
@@ -355,9 +682,53 @@ public class HeatmapServiceImpl implements HeatmapService {
                     .lat(point.getLat())
                     .lng(point.getLng())
                     .weight(point.getWeight())
+                    .coordType(point.getCoordType())
+                    .semanticTitle(point.getSemanticTitle())
+                    .semanticAddress(point.getSemanticAddress())
+                    .city(point.getCity())
+                    .district(point.getDistrict())
                     .build());
         }
         return copied;
+    }
+
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            String normalized = blankToNull(value);
+            if (normalized != null) {
+                return normalized;
+            }
+        }
+        return null;
+    }
+
+    private String joinAddress(String... parts) {
+        if (parts == null || parts.length == 0) {
+            return null;
+        }
+        StringBuilder builder = new StringBuilder();
+        for (String part : parts) {
+            String normalized = blankToNull(part);
+            if (normalized == null) {
+                continue;
+            }
+            if (!builder.isEmpty()) {
+                builder.append(' ');
+            }
+            builder.append(normalized);
+        }
+        return builder.isEmpty() ? null : builder.toString();
+    }
+
+    private String blankToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        return normalized.isEmpty() ? null : normalized;
     }
 
     private double round6(double value) {

@@ -42,6 +42,8 @@ public interface PlaceSummaryService {
 
     void generatePlaceSummariesForTripAsync(Long tripId);
 
+    void refreshSemanticInfoForTrip(Long tripId);
+
     void addMemberToPlaceSummary(Long placeSummaryId, String memberType, Long memberId, String memberRole, Float score);
 
     void addMembersToPlaceSummary(Long placeSummaryId, List<PlaceSummaryMemberPayload> members);

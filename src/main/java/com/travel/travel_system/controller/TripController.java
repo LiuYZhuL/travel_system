@@ -1,7 +1,14 @@
 package com.travel.travel_system.controller;
 
 import com.travel.travel_system.model.Trip;
+import com.travel.travel_system.model.TripAiSummary;
+import com.travel.travel_system.model.Photo;
+import com.travel.travel_system.model.PlaceSummary;
+import com.travel.travel_system.repository.PhotoRepository;
+import com.travel.travel_system.repository.PlaceSummaryRepository;
+import com.travel.travel_system.repository.TripAiSummaryRepository;
 import com.travel.travel_system.service.HeatmapService;
+import com.travel.travel_system.service.AiService;
 import com.travel.travel_system.service.TripService;
 import com.travel.travel_system.utils.ApiResponse;
 import com.travel.travel_system.utils.DateTimeUtils;
@@ -25,6 +32,14 @@ public class TripController extends BaseController {
 
     @Autowired
     private HeatmapService heatmapService;
+    @Autowired
+    private AiService aiService;
+    @Autowired
+    private PhotoRepository photoRepository;
+    @Autowired
+    private PlaceSummaryRepository placeSummaryRepository;
+    @Autowired
+    private TripAiSummaryRepository tripAiSummaryRepository;
 
     @PostMapping("")
     public ApiResponse<?> createTrip(@RequestBody Map<String, Object> request, HttpServletRequest httpRequest) {
@@ -69,6 +84,30 @@ public class TripController extends BaseController {
             );
             Page<Trip> tripPage = tripService.searchUserTrips(userId, pageable, keyword, status, startDate, endDate);
             List<Map<String, Object>> items = tripPage.getContent().stream().map(trip -> {
+                Photo coverPhoto = photoRepository.findByTripIdAndIsCoverTrue(trip.getId()).stream().findFirst().orElse(null);
+                if (coverPhoto == null) {
+                    coverPhoto = photoRepository.findFirstByTripIdOrderByCreatedAtDesc(trip.getId());
+                }
+                String oneLineSummary = null;
+                Optional<TripAiSummary> latestSummary = tripAiSummaryRepository.findFirstByTripIdAndIsLatestTrueOrderByGeneratedAtDescIdDesc(trip.getId());
+                if (latestSummary.isPresent() && latestSummary.get().getOverview() != null) {
+                    String overview = latestSummary.get().getOverview();
+                    oneLineSummary = overview.length() > 50 ? overview.substring(0, 50) + "..." : overview;
+                } else if (trip.getSummaryText() != null && !trip.getSummaryText().trim().isEmpty()) {
+                    String text = trip.getSummaryText();
+                    oneLineSummary = text.length() > 50 ? text.substring(0, 50) + "..." : text;
+                }
+                List<Map<String, Object>> topPlaces = new ArrayList<>();
+                List<PlaceSummary> places = placeSummaryRepository.findByTripIdOrderByDurationSecDesc(trip.getId());
+                for (int i = 0; i < Math.min(3, places.size()); i++) {
+                    PlaceSummary place = places.get(i);
+                    if (place.getPoiName() != null && !place.getPoiName().trim().isEmpty()) {
+                        Map<String, Object> placeItem = new LinkedHashMap<>();
+                        placeItem.put("name", place.getPoiName());
+                        placeItem.put("durationText", formatDuration(place.getDurationSec()));
+                        topPlaces.add(placeItem);
+                    }
+                }
                 Map<String, Object> item = new LinkedHashMap<>();
                 item.put("tripId", trip.getId());
                 item.put("title", trip.getTitle());
@@ -80,6 +119,11 @@ public class TripController extends BaseController {
                 item.put("durationSec", trip.getDurationSec() != null ? trip.getDurationSec() : 0L);
                 item.put("photoCount", trip.getPhotoCount() != null ? trip.getPhotoCount() : 0);
                 item.put("videoCount", trip.getVideoCount() != null ? trip.getVideoCount() : 0);
+                item.put("placeCount", (int) placeSummaryRepository.countByTripId(trip.getId()));
+                item.put("summaryText", trip.getSummaryText());
+                item.put("oneLineSummary", oneLineSummary);
+                item.put("topPlaces", topPlaces);
+                item.put("coverUrl", coverPhoto != null ? coverPhoto.getObjectKey() : null);
                 item.put("privacyMode", trip.getPrivacyMode() != null ? trip.getPrivacyMode().name() : null);
                 return item;
             }).collect(Collectors.toList());
@@ -168,6 +212,45 @@ public class TripController extends BaseController {
         }
     }
 
+    @PostMapping("/{tripId}/ai-summary/regenerate")
+    public ApiResponse<?> regenerateAiSummary(@PathVariable Long tripId,
+                                               @RequestBody(required = false) Map<String, Object> body,
+                                               HttpServletRequest request) {
+        try {
+            Long userId = requireUserId(request);
+            tripService.getUserTripOrThrow(userId, tripId);
+            String reason = body != null ? (String) body.get("reason") : null;
+            Map<String, Object> summary = aiService.regenerateTripSummary(tripId, reason);
+            return success(summary);
+        } catch (Exception e) {
+            return error("SYSTEM_500", "重新生成AI总结失败：" + e.getMessage());
+        }
+    }
+
+    @GetMapping("/{tripId}/ai-summary/history")
+    public ApiResponse<?> getAiSummaryHistory(@PathVariable Long tripId, HttpServletRequest request) {
+        try {
+            Long userId = requireUserId(request);
+            tripService.getUserTripOrThrow(userId, tripId);
+            return success(aiService.getAiSummaryHistory(tripId));
+        } catch (Exception e) {
+            return error("SYSTEM_500", "获取AI总结历史失败：" + e.getMessage());
+        }
+    }
+
+    @PutMapping("/{tripId}/ai-summary/rollback/{summaryId}")
+    public ApiResponse<?> rollbackAiSummary(@PathVariable Long tripId,
+                                             @PathVariable Long summaryId,
+                                             HttpServletRequest request) {
+        try {
+            Long userId = requireUserId(request);
+            tripService.getUserTripOrThrow(userId, tripId);
+            return success(aiService.rollbackAiSummary(tripId, summaryId));
+        } catch (Exception e) {
+            return error("SYSTEM_500", "回滚AI总结失败：" + e.getMessage());
+        }
+    }
+
     @GetMapping("/{tripId}/map")
     public ApiResponse<?> getTripMap(@PathVariable Long tripId, HttpServletRequest request) {
         try {
@@ -239,15 +322,6 @@ public class TripController extends BaseController {
             return success(tripService.getTripAiSummary(requireUserId(request), tripId, false));
         } catch (Exception e) {
             return error("SYSTEM_500", "获取AI总结失败：" + e.getMessage());
-        }
-    }
-
-    @PostMapping("/{tripId}/ai-summary/regenerate")
-    public ApiResponse<?> regenerateTripAiSummary(@PathVariable Long tripId, HttpServletRequest request) {
-        try {
-            return success(tripService.getTripAiSummary(requireUserId(request), tripId, true));
-        } catch (Exception e) {
-            return error("SYSTEM_500", "重新生成AI总结失败：" + e.getMessage());
         }
     }
 
@@ -343,5 +417,20 @@ public class TripController extends BaseController {
             return String.format(Locale.ROOT, "%.1f km", meters / 1000.0);
         }
         return meters + " m";
+    }
+
+    private String formatDuration(Long seconds) {
+        if (seconds == null || seconds <= 0) {
+            return "0 分钟";
+        }
+        if (seconds < 60) {
+            return seconds + " 秒";
+        }
+        if (seconds < 3600) {
+            return (seconds / 60) + " 分钟";
+        }
+        long hours = seconds / 3600;
+        long minutes = (seconds % 3600) / 60;
+        return hours + " 小时" + (minutes > 0 ? " " + minutes + " 分钟" : "");
     }
 }

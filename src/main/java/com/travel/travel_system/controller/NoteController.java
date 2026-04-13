@@ -41,6 +41,7 @@ public class NoteController extends BaseController {
             Double lat = asDouble(request.get("lat"));
             Double lng = asDouble(request.get("lng"));
             String locationName = asString(request.get("locationName"));
+            String coordType = normalizeCoordType(asString(request.get("coordType")));
 
             if (content == null || content.trim().isEmpty()) {
                 return error("VALID_001", "笔记内容不能为空");
@@ -58,6 +59,8 @@ public class NoteController extends BaseController {
             if (lat != null && lng != null) {
                 note.setLatEnc(encodeDouble(lat));
                 note.setLngEnc(encodeDouble(lng));
+                note.setCoordinateSource("MANUAL");
+                note.setCoordType(coordType);
             }
 
             TripNote saved = tripNoteService.createNote(note);
@@ -130,6 +133,7 @@ public class NoteController extends BaseController {
             Double lat = asDouble(request.get("lat"));
             Double lng = asDouble(request.get("lng"));
             String locationName = asString(request.get("locationName"));
+            String coordType = normalizeCoordType(asString(request.get("coordType")));
 
             TripNote updated = tripNoteService.updateNote(noteId, title, content, privacyMode);
 
@@ -139,8 +143,8 @@ public class NoteController extends BaseController {
                 updated = tripNoteService.updateAnchor(noteId, anchorTs, latEnc, lngEnc);
             }
 
-            if (locationName != null) {
-                updated.setLocationName(locationName);
+            if (locationName != null || (lat != null && lng != null)) {
+                updated = tripNoteService.updateLocation(noteId, lat, lng, locationName, coordType);
             }
 
             return success(toNoteVO(updated));
@@ -183,6 +187,7 @@ public class NoteController extends BaseController {
             Double lat = asDouble(request.get("lat"));
             Double lng = asDouble(request.get("lng"));
             String locationName = asString(request.get("locationName"));
+            String coordType = normalizeCoordType(asString(request.get("coordType")));
 
             if (lat == null || lng == null) {
                 return error("VALID_002", "坐标不能为空");
@@ -192,9 +197,7 @@ public class NoteController extends BaseController {
             byte[] lngEnc = encodeDouble(lng);
 
             TripNote updated = tripNoteService.updateAnchor(noteId, note.getAnchorTs(), latEnc, lngEnc);
-            if (locationName != null) {
-                updated.setLocationName(locationName);
-            }
+            updated = tripNoteService.updateLocation(noteId, lat, lng, locationName, coordType);
 
             return success(toNoteVO(updated));
         } catch (Exception e) {
@@ -274,9 +277,17 @@ public class NoteController extends BaseController {
             location.put("lat", lat);
             location.put("lng", lng);
             location.put("name", note.getLocationName());
+            location.put("coordType", note.getCoordType());
             vo.put("location", location);
         }
 
         return vo;
+    }
+
+    private String normalizeCoordType(String coordType) {
+        if (coordType == null || coordType.trim().isEmpty()) {
+            return "GCJ02";
+        }
+        return coordType.trim().toUpperCase();
     }
 }

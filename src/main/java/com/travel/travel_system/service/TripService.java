@@ -44,6 +44,8 @@ public interface TripService {
 
     TripDetailVO getTripDetail(Long userId, Long tripId);
 
+    TripDetailVO getPublicTripDetail(Long tripId);
+
     TripMapVO getTripMap(Long userId, Long tripId);
 
     List<PlaceSummaryVO> getTripPlaces(Long userId, Long tripId);
