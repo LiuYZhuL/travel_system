@@ -19,6 +19,8 @@ public interface VideoRepository extends JpaRepository<Video, Long> {
      */
     List<Video> findByTripId(Long tripId);
 
+    List<Video> findByNoteIdOrderByCreatedAtAsc(Long noteId);
+
     /**
      * 根据行程 ID 查询视频列表（按拍摄时间排序）
      */
@@ -73,6 +75,8 @@ public interface VideoRepository extends JpaRepository<Video, Long> {
      * 根据隐私模式查询视频
      */
     List<Video> findByTripIdAndPrivacyMode(Long tripId, String privacyMode);
+
+    List<Video> findByTripIdAndNoteIdIsNull(Long tripId);
 
     /**
      * 查询最近的视频

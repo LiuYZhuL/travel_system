@@ -7,6 +7,7 @@ import com.travel.travel_system.model.enums.PrivacyMode;
 import com.travel.travel_system.repository.AnchorRepository;
 import com.travel.travel_system.repository.PhotoRepository;
 import com.travel.travel_system.repository.TripRepository;
+import com.travel.travel_system.repository.VideoRepository;
 import com.travel.travel_system.service.MediaAnchorProjectionService;
 import com.travel.travel_system.service.PhotoService;
 import com.travel.travel_system.service.pub.OssService;
@@ -35,6 +36,8 @@ public class PhotoServiceImpl implements PhotoService {
     private PhotoRepository photoRepository;
     @Autowired
     private TripRepository tripRepository;
+    @Autowired
+    private VideoRepository videoRepository;
     @Autowired
     private AnchorRepository anchorRepository;
     @Autowired
@@ -84,6 +87,7 @@ public class PhotoServiceImpl implements PhotoService {
         }
 
         Photo savedPhoto = photoRepository.save(photo);
+        refreshTripMediaCounts(tripId);
 
         // 统一走投影服务，不再在这里手工创建占位 Anchor
         mediaAnchorProjectionService.projectPhotoAnchor(savedPhoto.getId(), tripId);
@@ -158,21 +162,38 @@ public class PhotoServiceImpl implements PhotoService {
         }
 
         photoRepository.delete(photo);
+        refreshTripMediaCounts(photo.getTripId());
     }
 
     @Override
     @Transactional
-    public Photo updatePhotoAssistInfo(Long photoId, Long captureTsOverride, Double manualLat, Double manualLng, String coordType) {
+    public Photo updatePhotoAssistInfo(Long photoId, Long captureTsOverride, Double manualLat, Double manualLng, String coordType, String locationName, String locationMode) {
         Photo photo = photoRepository.findById(photoId)
                 .orElseThrow(() -> new RuntimeException("照片不存在，photoId: " + photoId));
 
         photo.setCaptureTsOverride(captureTsOverride);
 
-        if (manualLat != null && manualLng != null) {
+        String normalizedMode = locationMode == null ? "" : locationMode.trim().toUpperCase();
+        if (manualLat != null && manualLng != null && !"EXIF".equals(normalizedMode)) {
             photo.setCaptureLatOverride(TrackPointServiceImpl.encodeDoubleStatic(manualLat));
             photo.setCaptureLngOverride(TrackPointServiceImpl.encodeDoubleStatic(manualLng));
             photo.setCaptureCoordSource("MANUAL");
             photo.setCaptureCoordType(coordType != null && !coordType.isBlank() ? coordType.toUpperCase() : "GCJ02");
+        } else if ("NONE".equals(normalizedMode)) {
+            photo.setCaptureLatOverride(null);
+            photo.setCaptureLngOverride(null);
+            photo.setCaptureCoordSource("NONE");
+            photo.setCaptureCoordType(null);
+        } else if ("EXIF".equals(normalizedMode)) {
+            photo.setCaptureLatOverride(null);
+            photo.setCaptureLngOverride(null);
+            if (photo.getLatEnc() != null && photo.getLngEnc() != null) {
+                photo.setCaptureCoordSource("EXIF");
+                photo.setCaptureCoordType("WGS84");
+            } else {
+                photo.setCaptureCoordSource("NONE");
+                photo.setCaptureCoordType(null);
+            }
         } else {
             photo.setCaptureLatOverride(null);
             photo.setCaptureLngOverride(null);
@@ -184,6 +205,9 @@ public class PhotoServiceImpl implements PhotoService {
 
         if (captureTsOverride != null) {
             photo.setCaptureTimeSource("USER_INPUT");
+        }
+        if (locationName != null) {
+            photo.setLocationName(locationName.isBlank() ? null : locationName.trim());
         }
 
         Photo saved = photoRepository.save(photo);
@@ -269,6 +293,17 @@ public class PhotoServiceImpl implements PhotoService {
             return url.substring(idx + 5);
         }
         return url;
+    }
+
+    private void refreshTripMediaCounts(Long tripId) {
+        if (tripId == null) {
+            return;
+        }
+        tripRepository.findById(tripId).ifPresent(trip -> {
+            trip.setPhotoCount((int) photoRepository.countByTripId(tripId));
+            trip.setVideoCount((int) videoRepository.countByTripId(tripId));
+            tripRepository.save(trip);
+        });
     }
 
     private static class PhotoExifMeta {

@@ -690,7 +690,7 @@ public class PlaceSummaryServiceImpl implements PlaceSummaryService {
             return false;
         }
         String normalized = poiName.trim();
-        return !normalized.matches("(?i)^(\\u5730\\u70b9|\\u505c\\u7559\\u70b9|place)\\s*\\d+$");
+        return !normalized.matches("(?i)^(地点|停留点|place)\\s*\\d+$");
     }
 
     private void addSemanticTags(Set<String> tags, String text) {
@@ -708,69 +708,69 @@ public class PlaceSummaryServiceImpl implements PlaceSummaryService {
     private static Map<String, String> buildSemanticTagKeywords() {
         Map<String, String> mapping = new LinkedHashMap<>();
 
-        mapping.put("\u8d85\u5e02", "\u8d85\u5e02");
-        mapping.put("\u4fbf\u5229\u5e97", "\u4fbf\u5229\u5e97");
-        mapping.put("\u5546\u573a", "\u5546\u573a");
-        mapping.put("\u8d2d\u7269", "\u8d2d\u7269");
-        mapping.put("\u8d2d\u7269\u670d\u52a1", "\u8d2d\u7269");
-        mapping.put("\u751f\u6d3b\u670d\u52a1", "\u751f\u6d3b\u670d\u52a1");
+        mapping.put("超市", "超市");
+        mapping.put("便利店", "便利店");
+        mapping.put("商场", "商场");
+        mapping.put("购物", "购物");
+        mapping.put("购物服务", "购物");
+        mapping.put("生活服务", "生活服务");
 
-        mapping.put("\u5b66\u6821", "\u5b66\u6821");
-        mapping.put("\u5927\u5b66", "\u5b66\u6821");
-        mapping.put("\u4e2d\u5b66", "\u5b66\u6821");
-        mapping.put("\u5c0f\u5b66", "\u5b66\u6821");
-        mapping.put("\u5e7c\u513f\u56ed", "\u5b66\u6821");
-        mapping.put("\u79d1\u6559\u6587\u5316\u670d\u52a1", "\u5b66\u6821");
+        mapping.put("学校", "学校");
+        mapping.put("大学", "学校");
+        mapping.put("中学", "学校");
+        mapping.put("小学", "学校");
+        mapping.put("幼儿园", "学校");
+        mapping.put("科教文化服务", "学校");
 
-        mapping.put("\u516c\u56ed", "\u516c\u56ed");
-        mapping.put("\u690d\u7269\u56ed", "\u516c\u56ed");
-        mapping.put("\u52a8\u7269\u56ed", "\u516c\u56ed");
-        mapping.put("\u5e7f\u573a", "\u5e7f\u573a");
-        mapping.put("\u4f53\u80b2\u4f11\u95f2\u670d\u52a1", "\u516c\u56ed");
+        mapping.put("公园", "公园");
+        mapping.put("植物园", "公园");
+        mapping.put("动物园", "公园");
+        mapping.put("广场", "广场");
+        mapping.put("体育休闲服务", "公园");
 
-        mapping.put("\u6e56", "\u6e56\u6cca");
-        mapping.put("\u6d77", "\u6d77\u8fb9");
-        mapping.put("\u6c5f", "\u6c5f\u6cb3");
-        mapping.put("\u6cb3", "\u6c5f\u6cb3");
-        mapping.put("\u6c34\u5e93", "\u6e56\u6cca");
-        mapping.put("\u6c99\u6ee9", "\u6d77\u8fb9");
-        mapping.put("\u6d77\u6ee9", "\u6d77\u8fb9");
-        mapping.put("\u6d77\u6ee8", "\u6d77\u8fb9");
+        mapping.put("湖", "湖泊");
+        mapping.put("海", "海边");
+        mapping.put("江", "江河");
+        mapping.put("河", "江河");
+        mapping.put("水库", "湖泊");
+        mapping.put("沙滩", "海边");
+        mapping.put("海滩", "海边");
+        mapping.put("海滨", "海边");
 
-        mapping.put("\u666f\u533a", "\u666f\u533a");
-        mapping.put("\u666f\u70b9", "\u666f\u533a");
-        mapping.put("\u98ce\u666f\u540d\u80dc", "\u666f\u533a");
-        mapping.put("\u98ce\u666f\u540d\u80dc\u76f8\u5173", "\u666f\u533a");
-        mapping.put("\u535a\u7269\u9986", "\u535a\u7269\u9986");
-        mapping.put("\u7f8e\u672f\u9986", "\u535a\u7269\u9986");
-        mapping.put("\u56fe\u4e66\u9986", "\u56fe\u4e66\u9986");
+        mapping.put("景区", "景区");
+        mapping.put("景点", "景区");
+        mapping.put("风景名胜", "景区");
+        mapping.put("风景名胜相关", "景区");
+        mapping.put("博物馆", "博物馆");
+        mapping.put("美术馆", "博物馆");
+        mapping.put("图书馆", "图书馆");
 
-        mapping.put("\u5bfa", "\u5bfa\u5e99");
-        mapping.put("\u5e99", "\u5bfa\u5e99");
-        mapping.put("\u6559\u5802", "\u6559\u5802");
+        mapping.put("寺", "寺庙");
+        mapping.put("庙", "寺庙");
+        mapping.put("教堂", "教堂");
 
-        mapping.put("\u533b\u9662", "\u533b\u9662");
-        mapping.put("\u533b\u7597\u4fdd\u5065\u670d\u52a1", "\u533b\u9662");
+        mapping.put("医院", "医院");
+        mapping.put("医疗保健服务", "医院");
 
-        mapping.put("\u5730\u94c1", "\u4ea4\u901a\u67a2\u7ebd");
-        mapping.put("\u706b\u8f66\u7ad9", "\u4ea4\u901a\u67a2\u7ebd");
-        mapping.put("\u9ad8\u94c1\u7ad9", "\u4ea4\u901a\u67a2\u7ebd");
-        mapping.put("\u673a\u573a", "\u4ea4\u901a\u67a2\u7ebd");
-        mapping.put("\u6c7d\u8f66\u7ad9", "\u4ea4\u901a\u67a2\u7ebd");
-        mapping.put("\u4ea4\u901a\u8bbe\u65bd\u670d\u52a1", "\u4ea4\u901a\u67a2\u7ebd");
+        mapping.put("地铁", "交通枢纽");
+        mapping.put("火车站", "交通枢纽");
+        mapping.put("高铁站", "交通枢纽");
+        mapping.put("机场", "交通枢纽");
+        mapping.put("汽车站", "交通枢纽");
+        mapping.put("交通设施服务", "交通枢纽");
 
-        mapping.put("\u9910\u5385", "\u9910\u996e");
-        mapping.put("\u996d\u5e97", "\u9910\u996e");
-        mapping.put("\u5496\u5561", "\u5496\u5561\u9986");
-        mapping.put("\u5496\u5561\u9986", "\u5496\u5561\u9986");
-        mapping.put("\u9910\u996e\u670d\u52a1", "\u9910\u996e");
+        mapping.put("餐厅", "餐饮");
+        mapping.put("饭店", "餐饮");
+        mapping.put("咖啡", "咖啡馆");
+        mapping.put("咖啡馆", "咖啡馆");
+        mapping.put("餐饮服务", "餐饮");
 
-        mapping.put("\u6c11\u5bbf", "\u4f4f\u5bbf");
-        mapping.put("\u9152\u5e97", "\u4f4f\u5bbf");
-        mapping.put("\u5bbe\u9986", "\u4f4f\u5bbf");
-        mapping.put("\u9732\u8425", "\u9732\u8425");
-        mapping.put("\u8425\u5730", "\u9732\u8425");
-        mapping.put("\u4f4f\u5bbf\u670d\u52a1", "\u4f4f\u5bbf");
+        mapping.put("民宿", "住宿");
+        mapping.put("酒店", "住宿");
+        mapping.put("宾馆", "住宿");
+        mapping.put("露营", "露营");
+        mapping.put("营地", "露营");
+        mapping.put("住宿服务", "住宿");
         return mapping;
     }
 
@@ -971,3 +971,5 @@ public class PlaceSummaryServiceImpl implements PlaceSummaryService {
                                   Double medianReportedSpeedMps) {
     }
 }
+
+

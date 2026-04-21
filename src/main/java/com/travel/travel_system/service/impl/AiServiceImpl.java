@@ -422,31 +422,31 @@ public class AiServiceImpl implements AiService {
     }
 
     private String buildDefaultSummary(Trip trip, List<PlaceSummary> places) {
-        String title = trip.getTitle() == null || trip.getTitle().isBlank() ? "\u65c5\u7a0b" : trip.getTitle().trim();
+        String title = trip.getTitle() == null || trip.getTitle().isBlank() ? "旅程" : trip.getTitle().trim();
         List<String> placeNames = collectPlaceNames(places, 3);
         List<String> sceneTags = collectSemanticTags(places, 3);
         StringBuilder summary = new StringBuilder();
-        summary.append("\u8fd9\u6b21").append(title).append("\u5171\u4e32\u8054\u4e86 ").append(places.size()).append(" \u4e2a\u505c\u7559\u70b9");
+        summary.append("这次").append(title).append("共串联了 ").append(places.size()).append(" 个停留点");
         if (!placeNames.isEmpty()) {
-            summary.append("\uff0c\u4e3b\u8981\u7ecf\u8fc7 ").append(String.join("\u3001", placeNames));
+            summary.append("，主要经过 ").append(String.join("、", placeNames));
         }
         if (!sceneTags.isEmpty()) {
-            summary.append("\uff0c\u6db5\u76d6\u4e86 ").append(String.join("\u3001", sceneTags)).append(" \u7b49\u573a\u666f");
+            summary.append("，涵盖了 ").append(String.join("、", sceneTags)).append(" 等场景");
         }
         if (trip.getDistanceM() != null && trip.getDistanceM() > 0) {
-            summary.append("\uff0c\u7d2f\u8ba1\u884c\u7a0b ").append(formatDistance(trip.getDistanceM()));
+            summary.append("，累计行程 ").append(formatDistance(trip.getDistanceM()));
         }
         if (trip.getDurationSec() != null && trip.getDurationSec() > 0) {
-            summary.append("\uff0c\u7528\u65f6 ").append(DateTimeUtils.formatDuration(trip.getDurationSec()));
+            summary.append("，用时 ").append(DateTimeUtils.formatDuration(trip.getDurationSec()));
         }
-        summary.append("\u3002");
+        summary.append("。");
         return summary.toString();
     }
 
     private List<String> buildHighlights(Trip trip, List<PlaceSummary> places, Long photoCount, Long videoCount) {
         LinkedHashSet<String> highlights = new LinkedHashSet<>();
         if (!places.isEmpty()) {
-            highlights.add("\u5171\u8bc6\u522b\u51fa " + places.size() + " \u4e2a\u6709\u6548\u505c\u7559\u70b9\u3002");
+            highlights.add("共识别出 " + places.size() + " 个有效停留点。");
         }
 
         List<String> topPlaces = collectPlaceNames(
@@ -456,45 +456,45 @@ public class AiServiceImpl implements AiService {
                 3
         );
         if (!topPlaces.isEmpty()) {
-            highlights.add("\u4e3b\u8981\u505c\u7559\u5730\u70b9\u5305\u62ec " + String.join("\u3001", topPlaces) + "\u3002");
+            highlights.add("主要停留地点包括 " + String.join("、", topPlaces) + "。");
         }
 
         List<String> sceneTags = collectSemanticTags(places, 4);
         if (!sceneTags.isEmpty()) {
-            highlights.add("\u884c\u7a0b\u8986\u76d6\u4e86 " + String.join("\u3001", sceneTags) + " \u7b49\u573a\u666f\u3002");
+            highlights.add("行程覆盖了 " + String.join("、", sceneTags) + " 等场景。");
         }
 
         if ((photoCount != null && photoCount > 0) || (videoCount != null && videoCount > 0)) {
-            StringBuilder mediaHighlight = new StringBuilder("\u5f71\u50cf\u8bb0\u5f55\u5171\u5305\u542b ");
+            StringBuilder mediaHighlight = new StringBuilder("影像记录共包含 ");
             boolean appended = false;
             if (photoCount != null && photoCount > 0) {
-                mediaHighlight.append(photoCount).append(" \u5f20\u7167\u7247");
+                mediaHighlight.append(photoCount).append(" 张照片");
                 appended = true;
             }
             if (videoCount != null && videoCount > 0) {
                 if (appended) {
-                    mediaHighlight.append("\u3001");
+                    mediaHighlight.append("、");
                 }
-                mediaHighlight.append(videoCount).append(" \u4e2a\u89c6\u9891");
+                mediaHighlight.append(videoCount).append(" 个视频");
             }
-            mediaHighlight.append("\u3002");
+            mediaHighlight.append("。");
             highlights.add(mediaHighlight.toString());
         }
 
         if ((trip.getDistanceM() != null && trip.getDistanceM() > 0) || (trip.getDurationSec() != null && trip.getDurationSec() > 0)) {
-            StringBuilder travelStats = new StringBuilder("\u884c\u7a0b\u7edf\u8ba1\uff1a");
+            StringBuilder travelStats = new StringBuilder("行程统计：");
             boolean appended = false;
             if (trip.getDistanceM() != null && trip.getDistanceM() > 0) {
-                travelStats.append("\u8ddd\u79bb ").append(formatDistance(trip.getDistanceM()));
+                travelStats.append("距离 ").append(formatDistance(trip.getDistanceM()));
                 appended = true;
             }
             if (trip.getDurationSec() != null && trip.getDurationSec() > 0) {
                 if (appended) {
-                    travelStats.append("\uff0c");
+                    travelStats.append("，");
                 }
-                travelStats.append("\u7528\u65f6 ").append(DateTimeUtils.formatDuration(trip.getDurationSec()));
+                travelStats.append("用时 ").append(DateTimeUtils.formatDuration(trip.getDurationSec()));
             }
-            travelStats.append("\u3002");
+            travelStats.append("。");
             highlights.add(travelStats.toString());
         }
 
@@ -503,22 +503,22 @@ public class AiServiceImpl implements AiService {
 
     private String buildRouteSummary(List<PlaceSummary> places) {
         if (places.isEmpty()) {
-            return "\u6682\u672a\u8bc6\u522b\u51fa\u660e\u786e\u7684\u505c\u7559\u8def\u7ebf\u3002";
+            return "暂未识别出明确的停留路线。";
         }
         List<String> placeNames = collectPlaceNames(places, 6);
         if (!placeNames.isEmpty()) {
-            return "\u8def\u7ebf\u5927\u81f4\u4e3a\uff1a" + String.join(" \u2192 ", placeNames) + "\u3002";
+            return "路线大致为：" + String.join(" → ", placeNames) + "。";
         }
         List<String> sceneTags = collectSemanticTags(places, 4);
         if (!sceneTags.isEmpty()) {
-            return "\u5f53\u524d\u5df2\u8bc6\u522b\u51fa " + String.join("\u3001", sceneTags) + " \u7b49\u573a\u666f\uff0c\u5177\u4f53\u5730\u70b9\u540d\u79f0\u4ecd\u5728\u8865\u5145\u4e2d\u3002";
+            return "当前已识别出 " + String.join("、", sceneTags) + " 等场景，具体地点名称仍在补充中。";
         }
-        return "\u8f68\u8ff9\u5df2\u8bb0\u5f55\uff0c\u4f46\u5730\u70b9\u8bed\u4e49\u4fe1\u606f\u4ecd\u5728\u8865\u5145\u3002";
+        return "轨迹已记录，但地点语义信息仍在补充。";
     }
 
     private String buildBestMoment(List<PlaceSummary> places, Long photoCount) {
         if (places.isEmpty()) {
-            return "\u65c5\u9014\u4e2d\u6bcf\u4e00\u6b21\u505c\u7559\u90fd\u503c\u5f97\u56de\u770b\u3002";
+            return "旅途中每一次停留都值得回看。";
         }
         PlaceSummary longestStay = places.stream()
                 .max(Comparator.comparingLong((PlaceSummary p) -> p.getDurationSec() == null ? 0L : p.getDurationSec()))
@@ -526,62 +526,62 @@ public class AiServiceImpl implements AiService {
         if (longestStay != null) {
             String placeName = isMeaningfulPlaceName(longestStay.getPoiName())
                     ? longestStay.getPoiName().trim()
-                    : "\u8fd9\u4e2a\u505c\u7559\u70b9";
+                    : "这个停留点";
             String durationText = longestStay.getDurationSec() == null || longestStay.getDurationSec() <= 0
                     ? null
                     : DateTimeUtils.formatDuration(longestStay.getDurationSec());
             String semanticLabel = resolvePrimarySemanticTag(longestStay);
             if (durationText != null && semanticLabel != null) {
-                return "\u5728 " + placeName + " \u505c\u7559\u4e86 " + durationText + "\uff0c\u8fd9\u6bb5 " + semanticLabel + " \u573a\u666f\u6210\u4e3a\u6574\u6bb5\u884c\u7a0b\u91cc\u6700\u6709\u8bb0\u5fc6\u70b9\u7684\u7247\u6bb5\u3002";
+                return "在 " + placeName + " 停留了 " + durationText + "，这段 " + semanticLabel + " 场景成为整段行程里最有记忆点的片段。";
             }
             if (durationText != null) {
-                return "\u5728 " + placeName + " \u505c\u7559\u4e86 " + durationText + "\uff0c\u662f\u8fd9\u6bb5\u884c\u7a0b\u6700\u503c\u5f97\u56de\u5473\u7684\u7247\u6bb5\u3002";
+                return "在 " + placeName + " 停留了 " + durationText + "，是这段行程最值得回味的片段。";
             }
-            return placeName + " \u662f\u8fd9\u6bb5\u65c5\u7a0b\u91cc\u6700\u5bb9\u6613\u88ab\u8bb0\u4f4f\u7684\u4e00\u7ad9\u3002";
+            return placeName + " 是这段旅程里最容易被记住的一站。";
         }
         if (photoCount != null && photoCount > 0) {
-            return "\u5f71\u50cf\u8bb0\u5f55\u6700\u5bc6\u96c6\u7684\u90a3\u6bb5\u505c\u7559\uff0c\u6784\u6210\u4e86\u8fd9\u6b21\u884c\u7a0b\u6700\u9c9c\u660e\u7684\u8bb0\u5fc6\u70b9\u3002";
+            return "影像记录最密集的那段停留，构成了这次行程最鲜明的记忆点。";
         }
-        return "\u65c5\u9014\u4e2d\u6bcf\u4e00\u6b21\u505c\u7559\u90fd\u503c\u5f97\u56de\u770b\u3002";
+        return "旅途中每一次停留都值得回看。";
     }
 
     private String buildStartText(Trip trip) {
-        return "\u884c\u7a0b\u4ece\u8fd9\u91cc\u5f00\u59cb\uff0c\u65b0\u7684\u8f68\u8ff9\u548c\u8bb0\u5f55\u6b63\u5728\u5c55\u5f00\u3002";
+        return "行程从这里开始，新的轨迹和记录正在展开。";
     }
 
     private String buildEndText(Trip trip) {
-        String title = trip.getTitle() == null || trip.getTitle().isBlank() ? "\u8fd9\u6bb5\u65c5\u7a0b" : trip.getTitle().trim();
-        return title + " \u5df2\u987a\u5229\u7ed3\u675f\uff0c\u8f68\u8ff9\u3001\u505c\u7559\u4e0e\u5f71\u50cf\u8bb0\u5f55\u5df2\u6574\u7406\u5b8c\u6210\u3002";
+        String title = trip.getTitle() == null || trip.getTitle().isBlank() ? "这段旅程" : trip.getTitle().trim();
+        return title + " 已顺利结束，轨迹、停留与影像记录已整理完成。";
     }
 
     private String buildPlaceSummaryText(PlaceSummary place) {
         List<String> parts = new ArrayList<>();
         if (isMeaningfulPlaceName(place.getPoiName())) {
-            parts.add("\u505c\u7559\u5730\u70b9\uff1a" + place.getPoiName().trim());
+            parts.add("停留地点：" + place.getPoiName().trim());
         }
         if (place.getDurationSec() != null && place.getDurationSec() > 0) {
-            parts.add("\u505c\u7559\u65f6\u957f\uff1a" + DateTimeUtils.formatDuration(place.getDurationSec()));
+            parts.add("停留时长：" + DateTimeUtils.formatDuration(place.getDurationSec()));
         }
         List<String> tags = collectSemanticTags(Collections.singletonList(place), 3);
         if (!tags.isEmpty()) {
-            parts.add("\u573a\u666f\u6807\u7b7e\uff1a" + String.join("\u3001", tags));
+            parts.add("场景标签：" + String.join("、", tags));
         }
         if ((place.getPhotoCount() != null && place.getPhotoCount() > 0) || (place.getVideoCount() != null && place.getVideoCount() > 0)) {
-            StringBuilder media = new StringBuilder("\u5f71\u50cf\u8bb0\u5f55\uff1a");
+            StringBuilder media = new StringBuilder("影像记录：");
             boolean appended = false;
             if (place.getPhotoCount() != null && place.getPhotoCount() > 0) {
-                media.append(place.getPhotoCount()).append(" \u5f20\u7167\u7247");
+                media.append(place.getPhotoCount()).append(" 张照片");
                 appended = true;
             }
             if (place.getVideoCount() != null && place.getVideoCount() > 0) {
                 if (appended) {
-                    media.append("\u3001");
+                    media.append("、");
                 }
-                media.append(place.getVideoCount()).append(" \u4e2a\u89c6\u9891");
+                media.append(place.getVideoCount()).append(" 个视频");
             }
             parts.add(media.toString());
         }
-        return parts.isEmpty() ? "\u8fd9\u91cc\u7559\u4e0b\u4e86\u4e00\u6bb5\u503c\u5f97\u56de\u770b\u7684\u505c\u7559\u3002" : String.join("\uff0c", parts) + "\u3002";
+        return parts.isEmpty() ? "这里留下了一段值得回看的停留。" : String.join("，", parts) + "。";
     }
 
     private List<String> collectPlaceNames(List<PlaceSummary> places, int limit) {
@@ -614,7 +614,7 @@ public class AiServiceImpl implements AiService {
         if (placeName == null || placeName.isBlank()) {
             return false;
         }
-        return !placeName.trim().matches("(?i)^(\\u5730\\u70b9|\\u505c\\u7559\\u70b9|place)\\s*\\d+$");
+        return !placeName.trim().matches("(?i)^(地点|停留点|place)\\s*\\d+$");
     }
 
     private String formatDistance(Long meters) {
@@ -649,11 +649,15 @@ public class AiServiceImpl implements AiService {
         List<String> normalizedLines = Arrays.stream(aiSummary.replace("\r", "\n").split("\n"))
                 .map(String::trim)
                 .map(line -> line
+                        .replace("***", "")
+                        .replace("**", "")
+                        .replace("__", "")
+                        .replace("`", "")
                         .replaceAll("^#{1,6}\\s*", "")
-                        .replaceAll("^[-*\\u2022]\\s*", "")
+                        .replaceAll("^[-*•]\\s*", "")
                         .replaceAll("^\\d+[.)、]\\s*", "")
                         .replaceAll("(?i)(trip summary|highlights|overall feeling|summary)[:：]?", "")
-                        .replaceAll("(\\u65c5\\u7a0b\\u603b\\u7ed3|\\u884c\\u7a0b\\u603b\\u7ed3|\\u603b\\u7ed3|\\u4eae\\u70b9|\\u8def\\u7ebf\\u6982\\u89c8|\\u6700\\u4f73\\u7247\\u6bb5)[:：]?", "")
+                        .replaceAll("(旅行总结|行程总结|总结|亮点|路线概览|最佳片段)[:：]?", "")
                         .trim())
                 .filter(line -> !line.isEmpty())
                 .collect(Collectors.toList());
@@ -670,9 +674,9 @@ public class AiServiceImpl implements AiService {
         }
 
         normalized = shortenOverview(normalized, 180);
-        if (!normalized.endsWith("\u3002") && !normalized.endsWith("\uff01") && !normalized.endsWith("\uff1f")
+        if (!normalized.endsWith("。") && !normalized.endsWith("！") && !normalized.endsWith("？")
                 && !normalized.endsWith("!") && !normalized.endsWith("?")) {
-            normalized = normalized + "\u3002";
+            normalized = normalized + "。";
         }
         return normalized;
     }
@@ -684,7 +688,7 @@ public class AiServiceImpl implements AiService {
         int punctuationIndex = -1;
         for (int i = Math.min(maxLength, text.length()) - 1; i >= Math.max(0, maxLength - 30); i--) {
             char ch = text.charAt(i);
-            if (ch == '\u3002' || ch == '\uff01' || ch == '\uff1f' || ch == ',' || ch == '\uff0c') {
+            if (ch == '。' || ch == '！' || ch == '？' || ch == ',' || ch == '，') {
                 punctuationIndex = i;
                 break;
             }
@@ -708,4 +712,5 @@ public class AiServiceImpl implements AiService {
         return value == null ? null : String.valueOf(value);
     }
 }
+
 

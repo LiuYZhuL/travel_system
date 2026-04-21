@@ -68,6 +68,15 @@ public class TrackPointServiceImpl implements TrackPointService {
     private static final double CANDIDATE_FALLBACK_RADIUS_METERS = 80.0;
     private static final int MAX_CANDIDATES_PER_POINT = 6;
     private static final int COMPLEX_PADDING_POINTS = 2;
+    private static final int TRANSITION_PADDING_POINTS = 2;
+    private static final int TRANSITION_GAP_POINT_LIMIT = 4;
+    private static final long TRANSITION_MAX_DURATION_MS = 12 * 60 * 1000L;
+    private static final double TRANSITION_MAX_PATH_METERS = 1200.0;
+    private static final double RAW_POINT_ROAD_DISTANCE_METERS = 18.0;
+    private static final double STRONG_ROAD_DISTANCE_METERS = 10.0;
+    private static final double WALK_SPEED_THRESHOLD_MPS = 2.2;
+    private static final double MOTOR_SPEED_THRESHOLD_MPS = 4.5;
+    private static final double ENDPOINT_STILL_SPEED_THRESHOLD_MPS = 1.6;
 
     private static final double SIGMA_DISTANCE_METERS = 15.0;
     private static final double SIGMA_HEADING_DEGREES = 25.0;
@@ -91,7 +100,7 @@ public class TrackPointServiceImpl implements TrackPointService {
     private static final String MATCH_DIRTY_KEY_PREFIX = "track_match:dirty:";
     private static final String MATCH_FINGERPRINT_KEY_PREFIX = "track_match:fingerprint:";
     private static final String MATCH_LOCK_KEY_PREFIX = "track_match:lock:";
-    private static final String MATCH_ALGO_VERSION = "paper-split-hmm-v3";
+    private static final String MATCH_ALGO_VERSION = "paper-split-hmm-v4-hybrid";
     private static final long MATCH_LATEST_TTL_SECONDS = 6 * 60 * 60L;
     private static final long MATCH_DIRTY_TTL_SECONDS = 24 * 60 * 60L;
     private static final long MATCH_LOCK_TTL_SECONDS = 5 * 60L;
@@ -421,7 +430,9 @@ public class TrackPointServiceImpl implements TrackPointService {
                 WindowSeed rollingSeed = carrySeed;
                 for (SegmentPlan plan : segmentPlans) {
                     List<MapMatchingResult> partial;
-                    if (plan.complexSegment) {
+                    if (plan.mode == SegmentMatchMode.RAW) {
+                        partial = projectRaw(windowPoints, graph, plan.startInclusive, plan.endInclusive, window.getStartIndex(), plan.reason);
+                    } else if (plan.mode == SegmentMatchMode.SECOND_ORDER) {
                         partial = runSecondOrderHmmSegment(windowPoints, candidateSets, graph, plan.startInclusive, plan.endInclusive, window.getStartIndex(), rollingSeed);
                     } else {
                         partial = runFirstOrderHmmSegment(windowPoints, candidateSets, graph, plan.startInclusive, plan.endInclusive, window.getStartIndex(), rollingSeed);
@@ -444,7 +455,9 @@ public class TrackPointServiceImpl implements TrackPointService {
                     rollingSeed = carrySeed;
                     for (SegmentPlan plan : expandedPlans) {
                         List<MapMatchingResult> partial;
-                        if (plan.complexSegment) {
+                        if (plan.mode == SegmentMatchMode.RAW) {
+                            partial = projectRaw(windowPoints, expanded, plan.startInclusive, plan.endInclusive, window.getStartIndex(), plan.reason);
+                        } else if (plan.mode == SegmentMatchMode.SECOND_ORDER) {
                             partial = runSecondOrderHmmSegment(windowPoints, expandedCandidateSets, expanded, plan.startInclusive, plan.endInclusive, window.getStartIndex(), rollingSeed);
                         } else {
                             partial = runFirstOrderHmmSegment(windowPoints, expandedCandidateSets, expanded, plan.startInclusive, plan.endInclusive, window.getStartIndex(), rollingSeed);
@@ -558,7 +571,7 @@ public class TrackPointServiceImpl implements TrackPointService {
 
         CandidateSet firstSet = candidateSets.get(startInclusive);
         if (firstSet.candidates.isEmpty()) {
-            return projectRaw(windowPoints, graph, startInclusive, endInclusive, globalWindowStart);
+            return projectRaw(windowPoints, graph, startInclusive, endInclusive, globalWindowStart, "NO_CANDIDATE_IN_FIRST_ORDER");
         }
 
         for (Candidate candidate : firstSet.candidates) {
@@ -575,7 +588,7 @@ public class TrackPointServiceImpl implements TrackPointService {
         for (int t = startInclusive + 1; t <= endInclusive; t++) {
             CandidateSet currentSet = candidateSets.get(t);
             if (currentSet.candidates.isEmpty()) {
-                return projectRaw(windowPoints, graph, startInclusive, endInclusive, globalWindowStart);
+                return projectRaw(windowPoints, graph, startInclusive, endInclusive, globalWindowStart, "FIRST_ORDER_CANDIDATE_GAP");
             }
 
             Map<Long, Double> currentScores = new HashMap<>();
@@ -655,7 +668,7 @@ public class TrackPointServiceImpl implements TrackPointService {
         CandidateSet firstSet = candidateSets.get(startInclusive);
         CandidateSet secondSet = candidateSets.get(startInclusive + 1);
         if (firstSet.candidates.isEmpty() || secondSet.candidates.isEmpty()) {
-            return projectRaw(windowPoints, graph, startInclusive, endInclusive, globalWindowStart);
+            return projectRaw(windowPoints, graph, startInclusive, endInclusive, globalWindowStart, "NO_CANDIDATE_IN_SECOND_ORDER");
         }
 
         Map<Long, Double> startProb = secondOrderStartProbabilities(firstSet);
@@ -695,7 +708,7 @@ public class TrackPointServiceImpl implements TrackPointService {
             CandidateSet prevSet = candidateSets.get(t - 1);
             CandidateSet prevPrevSet = candidateSets.get(t - 2);
             if (currentSet.candidates.isEmpty()) {
-                return projectRaw(windowPoints, graph, startInclusive, endInclusive, globalWindowStart);
+                return projectRaw(windowPoints, graph, startInclusive, endInclusive, globalWindowStart, "SECOND_ORDER_CANDIDATE_GAP");
             }
 
             Map<StateKey, Double> currentScores = new HashMap<>();
@@ -745,7 +758,7 @@ public class TrackPointServiceImpl implements TrackPointService {
 
         StateKey bestFinalState = argMaxState(prevScores);
         if (bestFinalState == null) {
-            return projectRaw(windowPoints, graph, startInclusive, endInclusive, globalWindowStart);
+            return projectRaw(windowPoints, graph, startInclusive, endInclusive, globalWindowStart, "SECOND_ORDER_PATH_BREAK");
         }
 
         Map<Integer, Long> bestPath = new HashMap<>();
@@ -782,9 +795,13 @@ public class TrackPointServiceImpl implements TrackPointService {
             return plans;
         }
 
+        boolean[] rawPreferred = buildRawPreferredFlags(sets);
+        fillShortTransitionGaps(sets, rawPreferred);
+        expandRawBoundaries(rawPreferred);
+
         boolean[] complex = new boolean[sets.size()];
         for (int i = 0; i < sets.size(); i++) {
-            complex[i] = isComplexPoint(sets.get(i), graph);
+            complex[i] = !rawPreferred[i] && isComplexPoint(sets.get(i), graph);
         }
 
         boolean[] expanded = new boolean[sets.size()];
@@ -801,15 +818,151 @@ public class TrackPointServiceImpl implements TrackPointService {
 
         int start = 0;
         while (start < sets.size()) {
-            boolean isComplex = expanded[start];
+            SegmentMatchMode mode = rawPreferred[start]
+                    ? SegmentMatchMode.RAW
+                    : (expanded[start] ? SegmentMatchMode.SECOND_ORDER : SegmentMatchMode.FIRST_ORDER);
             int end = start;
-            while (end + 1 < sets.size() && expanded[end + 1] == isComplex) {
+            while (end + 1 < sets.size()) {
+                SegmentMatchMode nextMode = rawPreferred[end + 1]
+                        ? SegmentMatchMode.RAW
+                        : (expanded[end + 1] ? SegmentMatchMode.SECOND_ORDER : SegmentMatchMode.FIRST_ORDER);
+                if (nextMode != mode) {
+                    break;
+                }
                 end++;
             }
-            plans.add(new SegmentPlan(start, end, isComplex));
+            plans.add(new SegmentPlan(start, end, mode, resolvePlanReason(mode, sets, start, end)));
             start = end + 1;
         }
         return plans;
+    }
+
+    private boolean[] buildRawPreferredFlags(List<CandidateSet> sets) {
+        boolean[] rawPreferred = new boolean[sets.size()];
+        for (int i = 0; i < sets.size(); i++) {
+            rawPreferred[i] = shouldPreferRawPoint(sets, i);
+        }
+        return rawPreferred;
+    }
+
+    private boolean shouldPreferRawPoint(List<CandidateSet> sets, int index) {
+        CandidateSet set = sets.get(index);
+        if (set == null || set.rawPoint == null) {
+            return true;
+        }
+        if (set.candidates == null || set.candidates.isEmpty()) {
+            return true;
+        }
+
+        TrackPoint rawPoint = set.rawPoint;
+        if (rawPoint.getSource() == TrackPointSource.MANUAL || rawPoint.getSource() == TrackPointSource.EXIF) {
+            return true;
+        }
+
+        double bestRoadDistance = bestCandidateDistance(set);
+        double speedMps = resolveMotionSpeedMps(sets, index);
+        boolean walkLike = speedMps <= WALK_SPEED_THRESHOLD_MPS;
+        boolean almostStill = speedMps <= ENDPOINT_STILL_SPEED_THRESHOLD_MPS;
+        boolean strongRoadAffinity = bestRoadDistance <= STRONG_ROAD_DISTANCE_METERS;
+        boolean weakRoadAffinity = bestRoadDistance >= RAW_POINT_ROAD_DISTANCE_METERS;
+
+        if (almostStill && bestRoadDistance > 6.0) {
+            return true;
+        }
+        if (walkLike && weakRoadAffinity) {
+            return true;
+        }
+
+        return walkLike
+                && isPedestrianFlexibleRoad(set)
+                && !strongRoadAffinity
+                && !isLikelyMotorizedRoad(set);
+    }
+
+    private void fillShortTransitionGaps(List<CandidateSet> sets, boolean[] rawPreferred) {
+        int i = 0;
+        while (i < rawPreferred.length) {
+            if (rawPreferred[i]) {
+                i++;
+                continue;
+            }
+
+            int gapStart = i;
+            while (i < rawPreferred.length && !rawPreferred[i]) {
+                i++;
+            }
+            int gapEnd = i - 1;
+            int left = gapStart - 1;
+            int right = i;
+
+            if (left < 0 || right >= rawPreferred.length) {
+                continue;
+            }
+            if (!rawPreferred[left] || !rawPreferred[right]) {
+                continue;
+            }
+            if (gapEnd - gapStart + 1 > TRANSITION_GAP_POINT_LIMIT) {
+                continue;
+            }
+
+            TransitionProfile profile = analyzeTransitionProfile(sets, left, right);
+            if (!profile.shortTransition()) {
+                continue;
+            }
+            for (int j = left; j <= right; j++) {
+                rawPreferred[j] = true;
+            }
+        }
+    }
+
+    private void expandRawBoundaries(boolean[] rawPreferred) {
+        boolean[] expanded = Arrays.copyOf(rawPreferred, rawPreferred.length);
+        for (int i = 0; i < rawPreferred.length; i++) {
+            if (!rawPreferred[i]) {
+                continue;
+            }
+            int from = Math.max(0, i - TRANSITION_PADDING_POINTS);
+            int to = Math.min(rawPreferred.length - 1, i + TRANSITION_PADDING_POINTS);
+            for (int j = from; j <= to; j++) {
+                expanded[j] = true;
+            }
+        }
+        System.arraycopy(expanded, 0, rawPreferred, 0, rawPreferred.length);
+    }
+
+    private TransitionProfile analyzeTransitionProfile(List<CandidateSet> sets, int startInclusive, int endInclusive) {
+        if (sets == null || sets.isEmpty() || startInclusive < 0 || endInclusive >= sets.size() || startInclusive > endInclusive) {
+            return TransitionProfile.empty();
+        }
+
+        long startTs = safeTs(sets.get(startInclusive).rawPoint);
+        long endTs = safeTs(sets.get(endInclusive).rawPoint);
+        double pathMeters = 0.0;
+        double firstSpeed = resolveMotionSpeedMps(sets, startInclusive);
+        double lastSpeed = resolveMotionSpeedMps(sets, endInclusive);
+        for (int i = startInclusive + 1; i <= endInclusive; i++) {
+            pathMeters += pointDistanceMeters(sets.get(i - 1).rawPoint, sets.get(i).rawPoint);
+        }
+        return new TransitionProfile(
+                Math.max(0L, endTs - startTs),
+                pathMeters,
+                firstSpeed,
+                lastSpeed
+        );
+    }
+
+    private String resolvePlanReason(SegmentMatchMode mode, List<CandidateSet> sets, int startInclusive, int endInclusive) {
+        if (mode == SegmentMatchMode.RAW) {
+            TransitionProfile profile = analyzeTransitionProfile(sets, startInclusive, endInclusive);
+            if (profile.shortTransition()) {
+                return "SHORT_WALKING_TRANSITION";
+            }
+            return "WALKING_OR_OFFROAD";
+        }
+        if (mode == SegmentMatchMode.SECOND_ORDER) {
+            return "COMPLEX_JUNCTION";
+        }
+        return "ROAD_NETWORK_STABLE";
     }
 
     private boolean isComplexPoint(CandidateSet set, RoadGraph graph) {
@@ -820,6 +973,104 @@ public class TrackPointServiceImpl implements TrackPointService {
         return set.maxNodeDegree >= 4
                 || set.directionComplexity >= 0.5
                 || set.complexityScore >= 0.5;
+    }
+
+    private double bestCandidateDistance(CandidateSet set) {
+        if (set == null || set.candidates == null || set.candidates.isEmpty()) {
+            return Double.POSITIVE_INFINITY;
+        }
+        return set.candidates.get(0).distanceMeters;
+    }
+
+    private boolean isPedestrianFlexibleRoad(CandidateSet set) {
+        if (set == null || set.candidates == null || set.candidates.isEmpty()) {
+            return false;
+        }
+        String highway = normalizeRoadType(set.candidates.get(0).segment);
+        return highway.equals("footway")
+                || highway.equals("pedestrian")
+                || highway.equals("path")
+                || highway.equals("track")
+                || highway.equals("steps")
+                || highway.equals("cycleway")
+                || highway.equals("living_street")
+                || highway.equals("service");
+    }
+
+    private boolean isLikelyMotorizedRoad(CandidateSet set) {
+        if (set == null || set.candidates == null || set.candidates.isEmpty()) {
+            return false;
+        }
+        String highway = normalizeRoadType(set.candidates.get(0).segment);
+        return highway.equals("motorway")
+                || highway.equals("trunk")
+                || highway.equals("primary")
+                || highway.equals("secondary")
+                || highway.equals("tertiary")
+                || highway.equals("residential")
+                || highway.equals("unclassified");
+    }
+
+    private String normalizeRoadType(RoadSegment segment) {
+        if (segment == null || segment.getHighwayType() == null) {
+            return "";
+        }
+        return segment.getHighwayType().trim().toLowerCase(Locale.ROOT);
+    }
+
+    private double resolveMotionSpeedMps(List<CandidateSet> sets, int index) {
+        CandidateSet currentSet = sets.get(index);
+        if (currentSet == null || currentSet.rawPoint == null) {
+            return Double.POSITIVE_INFINITY;
+        }
+        Float reported = currentSet.rawPoint.getSpeedMps();
+        if (reported != null && Float.isFinite(reported) && reported >= 0.0f) {
+            return reported;
+        }
+
+        TrackPoint prev = index > 0 ? sets.get(index - 1).rawPoint : null;
+        TrackPoint next = index + 1 < sets.size() ? sets.get(index + 1).rawPoint : null;
+        double inferred = inferSpeedFromNeighbors(prev, currentSet.rawPoint, next);
+        return Double.isFinite(inferred) ? inferred : Double.POSITIVE_INFINITY;
+    }
+
+    private double inferSpeedFromNeighbors(TrackPoint prev, TrackPoint current, TrackPoint next) {
+        double best = Double.POSITIVE_INFINITY;
+        if (prev != null) {
+            best = Math.min(best, inferSegmentSpeed(prev, current));
+        }
+        if (next != null) {
+            best = Math.min(best, inferSegmentSpeed(current, next));
+        }
+        return best;
+    }
+
+    private double inferSegmentSpeed(TrackPoint from, TrackPoint to) {
+        if (from == null || to == null || from.getTs() == null || to.getTs() == null) {
+            return Double.POSITIVE_INFINITY;
+        }
+        long deltaMs = Math.abs(to.getTs() - from.getTs());
+        if (deltaMs <= 0L) {
+            return Double.POSITIVE_INFINITY;
+        }
+        double distanceMeters = pointDistanceMeters(from, to);
+        return distanceMeters / (deltaMs / 1000.0);
+    }
+
+    private double pointDistanceMeters(TrackPoint from, TrackPoint to) {
+        if (from == null || to == null || from.getLatEnc() == null || from.getLngEnc() == null || to.getLatEnc() == null || to.getLngEnc() == null) {
+            return 0.0;
+        }
+        return GeoUtils.haversineMeters(
+                decodeDouble(from.getLatEnc()),
+                decodeDouble(from.getLngEnc()),
+                decodeDouble(to.getLatEnc()),
+                decodeDouble(to.getLngEnc())
+        );
+    }
+
+    private long safeTs(TrackPoint point) {
+        return point == null || point.getTs() == null ? 0L : point.getTs();
     }
 
     private List<CandidateSet> buildCandidateSets(List<TrackPoint> windowPoints, RoadGraph graph) {
@@ -1207,11 +1458,16 @@ public class TrackPointServiceImpl implements TrackPointService {
         MapMatchingResult result = new MapMatchingResult();
         result.setTrackPointId(set.rawPoint.getId());
         result.setPosition(position);
+        result.setRawLatitude(set.lat);
+        result.setRawLongitude(set.lon);
 
         if (matched == null) {
             result.setMatchedLatitude(set.lat);
             result.setMatchedLongitude(set.lon);
+            result.setRoadDistanceMeters(null);
             result.setConfidence(0.05);
+            result.setMatchMode(SegmentMatchMode.RAW.name());
+            result.setMatchReason("NO_ROAD_CANDIDATE");
             return result;
         }
 
@@ -1222,7 +1478,10 @@ public class TrackPointServiceImpl implements TrackPointService {
         result.setMatchedSegmentId(matched.segment.getSegmentId());
         result.setMatchedWayId(matched.segment.getOsmWayId());
         result.setMatchedRoadName(matched.segment.getName());
+        result.setRoadDistanceMeters(matched.distanceMeters);
         result.setConfidence(Math.max(0.05, 1.0 / (1.0 + matched.distanceMeters)));
+        result.setMatchMode(SegmentMatchMode.ROAD.name());
+        result.setMatchReason("ROAD_NETWORK_MATCH");
         return result;
     }
     public List<MapMatchingResult> getLatestMatchedCacheOrCompute(Long tripId) {
@@ -1419,8 +1678,10 @@ public class TrackPointServiceImpl implements TrackPointService {
                                                RoadGraph graph,
                                                int startInclusive,
                                                int endInclusive,
-                                               int globalWindowStart) {
-        log.warn("[MAP_MATCH_FALLBACK_RAW] globalStart={} range={}..{} reason=no_usable_candidates", globalWindowStart, startInclusive, endInclusive);
+                                               int globalWindowStart,
+                                               String reason) {
+        String effectiveReason = reason == null || reason.isBlank() ? "RAW_PRESERVE" : reason;
+        log.warn("[MAP_MATCH_FALLBACK_RAW] globalStart={} range={}..{} reason={}", globalWindowStart, startInclusive, endInclusive, effectiveReason);
         List<MapMatchingResult> results = new ArrayList<>();
         for (int i = startInclusive; i <= endInclusive; i++) {
             TrackPoint p = windowPoints.get(i);
@@ -1442,16 +1703,18 @@ public class TrackPointServiceImpl implements TrackPointService {
             set.rawPoint = p;
             set.lat = lat;
             set.lon = lon;
-            Candidate candidate = null;
-            if (best != null) {
-                candidate = new Candidate();
-                candidate.segment = best;
-                candidate.projection = projectToSegment(best, lat, lon);
-                candidate.distanceMeters = bestDist;
-                candidate.segmentHeadingDeg = candidate.projection.getLocalDirectionDegrees();
-                candidate.headingDeltaDeg = 0.0;
-            }
-            results.add(toResult(set, candidate, globalWindowStart + i));
+            MapMatchingResult rawResult = new MapMatchingResult();
+            rawResult.setTrackPointId(p.getId());
+            rawResult.setPosition(globalWindowStart + i);
+            rawResult.setRawLatitude(lat);
+            rawResult.setRawLongitude(lon);
+            rawResult.setMatchedLatitude(lat);
+            rawResult.setMatchedLongitude(lon);
+            rawResult.setRoadDistanceMeters(best == null || !Double.isFinite(bestDist) ? null : bestDist);
+            rawResult.setConfidence(best != null && bestDist <= STRONG_ROAD_DISTANCE_METERS ? 0.6 : 0.4);
+            rawResult.setMatchMode(SegmentMatchMode.RAW.name());
+            rawResult.setMatchReason(effectiveReason);
+            results.add(rawResult);
         }
         return results;
     }
@@ -2210,11 +2473,16 @@ public class TrackPointServiceImpl implements TrackPointService {
         copy.setPosition(source.getPosition());
         copy.setMatchedLatitude(source.getMatchedLatitude());
         copy.setMatchedLongitude(source.getMatchedLongitude());
+        copy.setRawLatitude(source.getRawLatitude());
+        copy.setRawLongitude(source.getRawLongitude());
         copy.setMatchedRoadId(source.getMatchedRoadId());
         copy.setMatchedRoadName(source.getMatchedRoadName());
         copy.setMatchedSegmentId(source.getMatchedSegmentId());
         copy.setMatchedWayId(source.getMatchedWayId());
+        copy.setRoadDistanceMeters(source.getRoadDistanceMeters());
         copy.setConfidence(source.getConfidence());
+        copy.setMatchMode(source.getMatchMode());
+        copy.setMatchReason(source.getMatchReason());
         return copy;
     }
 
@@ -2528,11 +2796,12 @@ public class TrackPointServiceImpl implements TrackPointService {
             return;
         }
         for (SegmentPlan plan : plans) {
-            log.warn("[MAP_MATCH_SEGMENT_PLAN] window={} range={}..{} mode={}",
+            log.warn("[MAP_MATCH_SEGMENT_PLAN] window={} range={}..{} mode={} reason={}",
                     window == null ? -1 : window.getIndex(),
                     plan.startInclusive,
                     plan.endInclusive,
-                    plan.complexSegment ? "SECOND_ORDER_COMPLEX" : "FIRST_ORDER_SIMPLE");
+                    plan.mode,
+                    plan.reason);
         }
     }
 
@@ -2854,13 +3123,22 @@ public class TrackPointServiceImpl implements TrackPointService {
     private static class SegmentPlan {
         final int startInclusive;
         final int endInclusive;
-        final boolean complexSegment;
+        final SegmentMatchMode mode;
+        final String reason;
 
-        private SegmentPlan(int startInclusive, int endInclusive, boolean complexSegment) {
+        private SegmentPlan(int startInclusive, int endInclusive, SegmentMatchMode mode, String reason) {
             this.startInclusive = startInclusive;
             this.endInclusive = endInclusive;
-            this.complexSegment = complexSegment;
+            this.mode = mode;
+            this.reason = reason;
         }
+    }
+
+    private enum SegmentMatchMode {
+        RAW,
+        FIRST_ORDER,
+        SECOND_ORDER,
+        ROAD
     }
 
     private static class CandidateSet {
@@ -2883,6 +3161,23 @@ public class TrackPointServiceImpl implements TrackPointService {
         double distanceMeters;
         double segmentHeadingDeg;
         double headingDeltaDeg;
+    }
+
+    private record TransitionProfile(long durationMs,
+                                     double pathMeters,
+                                     double startSpeedMps,
+                                     double endSpeedMps) {
+        static TransitionProfile empty() {
+            return new TransitionProfile(0L, 0.0, Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY);
+        }
+
+        boolean shortTransition() {
+            return durationMs > 0
+                    && durationMs <= TRANSITION_MAX_DURATION_MS
+                    && pathMeters <= TRANSITION_MAX_PATH_METERS
+                    && startSpeedMps <= ENDPOINT_STILL_SPEED_THRESHOLD_MPS
+                    && endSpeedMps <= ENDPOINT_STILL_SPEED_THRESHOLD_MPS;
+        }
     }
 
     private static class WindowSeed {

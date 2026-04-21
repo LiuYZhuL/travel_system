@@ -22,6 +22,11 @@ public class MapMatchingResult {
 
     private Double confidence;
     private Integer position;
+    private Double rawLatitude;
+    private Double rawLongitude;
+    private Double roadDistanceMeters;
+    private String matchMode;
+    private String matchReason;
 
     public MapMatchingResult() {
     }

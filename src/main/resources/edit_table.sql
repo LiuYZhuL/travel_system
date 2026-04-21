@@ -32,18 +32,22 @@ CREATE INDEX idx_track_point_trip_segment_ts ON track_point(trip_id, segment_id,
 -- 3. Photo / Video：增加手动修正时间/位置，以及归属判定状态
 -- =========================
 ALTER TABLE photo
+  ADD COLUMN note_id BIGINT DEFAULT NULL COMMENT '关联的笔记 ID',
   ADD COLUMN capture_ts_override BIGINT DEFAULT NULL COMMENT '用户修正后的拍摄时间戳',
   ADD COLUMN capture_lat_override BINARY(16) DEFAULT NULL COMMENT '用户修正后的拍摄纬度',
   ADD COLUMN capture_lng_override BINARY(16) DEFAULT NULL COMMENT '用户修正后的拍摄经度',
+  ADD COLUMN location_name VARCHAR(255) DEFAULT NULL COMMENT '用户确认后的地点名称',
   ADD COLUMN binding_status ENUM('PENDING','IN_TRIP','OUT_OF_TRIP','MANUAL_CONFIRMED') NOT NULL DEFAULT 'PENDING' COMMENT '媒体是否属于本次行程',
   ADD COLUMN binding_score FLOAT DEFAULT NULL COMMENT '媒体归属评分',
   ADD COLUMN capture_time_source VARCHAR(32) DEFAULT NULL COMMENT 'EXIF/USER_INPUT/UPLOAD_TIME',
   ADD COLUMN capture_coord_source VARCHAR(32) DEFAULT NULL COMMENT 'EXIF/MANUAL/NONE';
 
 ALTER TABLE video
+  ADD COLUMN note_id BIGINT DEFAULT NULL COMMENT '关联的笔记 ID',
   ADD COLUMN capture_ts_override BIGINT DEFAULT NULL COMMENT '用户修正后的拍摄时间戳',
   ADD COLUMN capture_lat_override BINARY(16) DEFAULT NULL COMMENT '用户修正后的拍摄纬度',
   ADD COLUMN capture_lng_override BINARY(16) DEFAULT NULL COMMENT '用户修正后的拍摄经度',
+  ADD COLUMN location_name VARCHAR(255) DEFAULT NULL COMMENT '用户确认后的地点名称',
   ADD COLUMN binding_status ENUM('PENDING','IN_TRIP','OUT_OF_TRIP','MANUAL_CONFIRMED') NOT NULL DEFAULT 'PENDING' COMMENT '媒体是否属于本次行程',
   ADD COLUMN binding_score FLOAT DEFAULT NULL COMMENT '媒体归属评分',
   ADD COLUMN capture_time_source VARCHAR(32) DEFAULT NULL COMMENT 'EXIF/USER_INPUT/UPLOAD_TIME',
@@ -51,6 +55,8 @@ ALTER TABLE video
 
 CREATE INDEX idx_photo_trip_binding ON photo(trip_id, binding_status, shot_time_exif);
 CREATE INDEX idx_video_trip_binding ON video(trip_id, binding_status, shot_time_exif);
+CREATE INDEX idx_photo_note_id ON photo(note_id);
+CREATE INDEX idx_video_note_id ON video(note_id);
 
 -- =========================
 -- 4. Anchor：允许 pending/out_of_trip 时没有最终投影点

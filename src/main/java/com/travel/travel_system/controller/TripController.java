@@ -7,6 +7,7 @@ import com.travel.travel_system.model.PlaceSummary;
 import com.travel.travel_system.repository.PhotoRepository;
 import com.travel.travel_system.repository.PlaceSummaryRepository;
 import com.travel.travel_system.repository.TripAiSummaryRepository;
+import com.travel.travel_system.repository.VideoRepository;
 import com.travel.travel_system.service.HeatmapService;
 import com.travel.travel_system.service.AiService;
 import com.travel.travel_system.service.TripService;
@@ -36,6 +37,8 @@ public class TripController extends BaseController {
     private AiService aiService;
     @Autowired
     private PhotoRepository photoRepository;
+    @Autowired
+    private VideoRepository videoRepository;
     @Autowired
     private PlaceSummaryRepository placeSummaryRepository;
     @Autowired
@@ -109,6 +112,8 @@ public class TripController extends BaseController {
                     }
                 }
                 Map<String, Object> item = new LinkedHashMap<>();
+                int photoCount = (int) photoRepository.countByTripId(trip.getId());
+                int videoCount = (int) videoRepository.countByTripId(trip.getId());
                 item.put("tripId", trip.getId());
                 item.put("title", trip.getTitle());
                 item.put("status", trip.getStatus() != null ? trip.getStatus().name() : null);
@@ -117,8 +122,8 @@ public class TripController extends BaseController {
                 item.put("distanceM", trip.getDistanceM() != null ? trip.getDistanceM() : 0L);
                 item.put("distanceText", formatDistance(trip.getDistanceM()));
                 item.put("durationSec", trip.getDurationSec() != null ? trip.getDurationSec() : 0L);
-                item.put("photoCount", trip.getPhotoCount() != null ? trip.getPhotoCount() : 0);
-                item.put("videoCount", trip.getVideoCount() != null ? trip.getVideoCount() : 0);
+                item.put("photoCount", photoCount);
+                item.put("videoCount", videoCount);
                 item.put("placeCount", (int) placeSummaryRepository.countByTripId(trip.getId()));
                 item.put("summaryText", trip.getSummaryText());
                 item.put("oneLineSummary", oneLineSummary);

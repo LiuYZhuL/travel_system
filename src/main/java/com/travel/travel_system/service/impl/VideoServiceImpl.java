@@ -6,6 +6,7 @@ import com.travel.travel_system.model.Video;
 import com.travel.travel_system.model.enums.PrivacyMode;
 import com.travel.travel_system.model.enums.VideoProcessingStatus;
 import com.travel.travel_system.repository.AnchorRepository;
+import com.travel.travel_system.repository.PhotoRepository;
 import com.travel.travel_system.repository.TripRepository;
 import com.travel.travel_system.repository.VideoRepository;
 import com.travel.travel_system.service.MediaAnchorProjectionService;
@@ -45,6 +46,8 @@ public class VideoServiceImpl implements VideoService {
     private VideoRepository videoRepository;
     @Autowired
     private TripRepository tripRepository;
+    @Autowired
+    private PhotoRepository photoRepository;
     @Autowired
     private AnchorRepository anchorRepository;
     @Autowired
@@ -103,6 +106,7 @@ public class VideoServiceImpl implements VideoService {
         }
 
         Video savedVideo = videoRepository.save(video);
+        refreshTripMediaCounts(tripId);
 
         // 统一走投影服务
         mediaAnchorProjectionService.projectVideoAnchor(savedVideo.getId(), tripId);
@@ -166,6 +170,7 @@ public class VideoServiceImpl implements VideoService {
         }
 
         videoRepository.delete(video);
+        refreshTripMediaCounts(video.getTripId());
     }
 
     @Override
@@ -218,17 +223,33 @@ public class VideoServiceImpl implements VideoService {
 
     @Override
     @Transactional
-    public Video updateVideoAssistInfo(Long videoId, Long captureTsOverride, Double manualLat, Double manualLng, String coordType) {
+    public Video updateVideoAssistInfo(Long videoId, Long captureTsOverride, Double manualLat, Double manualLng, String coordType, String locationName, String locationMode) {
         Video video = videoRepository.findById(videoId)
                 .orElseThrow(() -> new RuntimeException("视频不存在，videoId: " + videoId));
 
         video.setCaptureTsOverride(captureTsOverride);
 
-        if (manualLat != null && manualLng != null) {
+        String normalizedMode = locationMode == null ? "" : locationMode.trim().toUpperCase();
+        if (manualLat != null && manualLng != null && !"EXIF".equals(normalizedMode)) {
             video.setCaptureLatOverride(TrackPointServiceImpl.encodeDoubleStatic(manualLat));
             video.setCaptureLngOverride(TrackPointServiceImpl.encodeDoubleStatic(manualLng));
             video.setCaptureCoordSource("MANUAL");
             video.setCaptureCoordType(coordType != null && !coordType.isBlank() ? coordType.toUpperCase() : "GCJ02");
+        } else if ("NONE".equals(normalizedMode)) {
+            video.setCaptureLatOverride(null);
+            video.setCaptureLngOverride(null);
+            video.setCaptureCoordSource("NONE");
+            video.setCaptureCoordType(null);
+        } else if ("EXIF".equals(normalizedMode)) {
+            video.setCaptureLatOverride(null);
+            video.setCaptureLngOverride(null);
+            if (video.getLatEnc() != null && video.getLngEnc() != null) {
+                video.setCaptureCoordSource("EXIF");
+                video.setCaptureCoordType("WGS84");
+            } else {
+                video.setCaptureCoordSource("NONE");
+                video.setCaptureCoordType(null);
+            }
         } else {
             video.setCaptureLatOverride(null);
             video.setCaptureLngOverride(null);
@@ -240,6 +261,9 @@ public class VideoServiceImpl implements VideoService {
 
         if (captureTsOverride != null) {
             video.setCaptureTimeSource("USER_INPUT");
+        }
+        if (locationName != null) {
+            video.setLocationName(locationName.isBlank() ? null : locationName.trim());
         }
 
         Video saved = videoRepository.save(video);
@@ -370,6 +394,13 @@ public class VideoServiceImpl implements VideoService {
             grabber = new FFmpegFrameGrabber(videoFile);
             grabber.start();
 
+            if (video.getDurationSec() == null || video.getDurationSec() <= 0) {
+                long lengthInTime = grabber.getLengthInTime();
+                if (lengthInTime > 0) {
+                    video.setDurationSec((int) Math.max(1L, Math.round(lengthInTime / 1_000_000d)));
+                }
+            }
+
             int totalFrames = grabber.getLengthInFrames();
             int targetFrame = Math.max(totalFrames / 3, 1);
 
@@ -388,6 +419,9 @@ public class VideoServiceImpl implements VideoService {
                 if (bufferedImage != null) {
                     int width = bufferedImage.getWidth();
                     int height = bufferedImage.getHeight();
+                    if ((video.getResolution() == null || video.getResolution().isBlank()) && width > 0 && height > 0) {
+                        video.setResolution(width + "x" + height);
+                    }
 
                     int thumbWidth = 320;
                     int thumbHeight = (int) ((double) height / width * thumbWidth);
@@ -559,6 +593,17 @@ public class VideoServiceImpl implements VideoService {
             return url.substring(idx + 5);
         }
         return url;
+    }
+
+    private void refreshTripMediaCounts(Long tripId) {
+        if (tripId == null) {
+            return;
+        }
+        tripRepository.findById(tripId).ifPresent(trip -> {
+            trip.setPhotoCount((int) photoRepository.countByTripId(tripId));
+            trip.setVideoCount((int) videoRepository.countByTripId(tripId));
+            tripRepository.save(trip);
+        });
     }
 
     private static class VideoMeta {

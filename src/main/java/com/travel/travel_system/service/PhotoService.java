@@ -32,5 +32,5 @@ public interface PhotoService {
     Photo updatePhotoInfo(Long photoId, String userCaption, String privacyMode, Boolean isCover);
 
     void deletePhoto(Long photoId);
-    Photo updatePhotoAssistInfo(Long photoId, Long captureTsOverride, Double manualLat, Double manualLng, String coordType);
+    Photo updatePhotoAssistInfo(Long photoId, Long captureTsOverride, Double manualLat, Double manualLng, String coordType, String locationName, String locationMode);
 }

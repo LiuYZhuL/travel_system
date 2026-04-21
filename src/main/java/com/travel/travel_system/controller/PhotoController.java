@@ -58,6 +58,7 @@ public class PhotoController extends BaseController {
                                                @RequestParam(required = false) Double lat,
                                                @RequestParam(required = false) Double lng,
                                                @RequestParam(required = false) String locationName,
+                                               @RequestParam(required = false) String locationMode,
                                                @RequestParam(required = false) String coordType,
                                                @RequestParam MultipartFile file,
                                                HttpServletRequest httpRequest) {
@@ -71,8 +72,16 @@ public class PhotoController extends BaseController {
             String base64 = Base64.getEncoder().encodeToString(file.getBytes());
             Photo photo = photoService.uploadPhoto(tripId, file.getOriginalFilename(), file.getContentType(), base64);
 
-            if (lat != null && lng != null) {
-                photoService.updatePhotoAssistInfo(photo.getId(), capturedAt, lat, lng, normalizeCoordType(coordType));
+            if (capturedAt != null || lat != null || lng != null || locationName != null || locationMode != null) {
+                photoService.updatePhotoAssistInfo(
+                        photo.getId(),
+                        capturedAt,
+                        lat,
+                        lng,
+                        normalizeCoordType(coordType),
+                        locationName,
+                        normalizeLocationMode(locationMode)
+                );
                 photo = photoService.getPhotoAnchor(photo.getId());
             }
 
@@ -138,7 +147,9 @@ public class PhotoController extends BaseController {
                     toLong(request.get("captureTsOverride")),
                     toDouble(request.get("manualLat")),
                     toDouble(request.get("manualLng")),
-                    asString(request.get("coordType"))
+                    asString(request.get("coordType")),
+                    asString(request.get("locationName")),
+                    asString(request.get("locationMode"))
             );
 
             Map<String, Object> data = new LinkedHashMap<>();
@@ -171,6 +182,7 @@ public class PhotoController extends BaseController {
         vo.put("createdAt", DateTimeUtils.formatDateTime(photo.getCreatedAt()));
         vo.put("captureCoordSource", photo.getCaptureCoordSource());
         vo.put("captureCoordType", photo.getCaptureCoordType());
+        vo.put("locationName", photo.getLocationName());
         vo.put("bindingStatus", photo.getBindingStatus());
         vo.put("isCover", photo.getIsCover());
         return vo;
@@ -181,6 +193,13 @@ public class PhotoController extends BaseController {
             return "GCJ02";
         }
         return coordType.trim().toUpperCase();
+    }
+
+    private String normalizeLocationMode(String locationMode) {
+        if (locationMode == null || locationMode.trim().isEmpty()) {
+            return null;
+        }
+        return locationMode.trim().toUpperCase();
     }
 
     private Long toLong(Object value) {

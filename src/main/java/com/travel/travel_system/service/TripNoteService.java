@@ -27,6 +27,8 @@ public interface TripNoteService {
 
     TripNote updateLocation(Long noteId, Double lat, Double lng, String locationName, String coordType);
 
+    TripNote applyDefaultAnchorAndLocation(Long noteId, Long anchorTs, Double lat, Double lng, String locationName, String coordType, String coordinateSource);
+
     void deleteNote(Long noteId);
 
     void deleteNotesByTrip(Long tripId);

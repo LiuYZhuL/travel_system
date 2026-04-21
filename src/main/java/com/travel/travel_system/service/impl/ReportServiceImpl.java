@@ -1,13 +1,31 @@
 package com.travel.travel_system.service.impl;
 
-import com.travel.travel_system.model.*;
-import com.travel.travel_system.repository.*;
+import com.travel.travel_system.model.PlaceSummary;
+import com.travel.travel_system.model.Trip;
+import com.travel.travel_system.repository.PlaceSummaryRepository;
+import com.travel.travel_system.repository.TripNoteRepository;
+import com.travel.travel_system.repository.TripRepository;
 import com.travel.travel_system.service.ReportService;
+import com.travel.travel_system.service.TripService;
 import com.travel.travel_system.utils.DateTimeUtils;
+import com.travel.travel_system.vo.PlaceSummaryVO;
+import com.travel.travel_system.vo.StoryBlockVO;
+import com.travel.travel_system.vo.TripAISummaryVO;
+import com.travel.travel_system.vo.TripDetailVO;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import java.util.*;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Service
@@ -20,91 +38,71 @@ public class ReportServiceImpl implements ReportService {
     private PlaceSummaryRepository placeSummaryRepository;
 
     @Autowired
-    private PhotoRepository photoRepository;
-
-    @Autowired
-    private VideoRepository videoRepository;
-
-    @Autowired
     private TripNoteRepository tripNoteRepository;
 
     @Autowired
-    private StoryBlockRepository storyBlockRepository;
-
-    @Autowired
-    private TripAiSummaryRepository tripAiSummaryRepository;
-
-    @Autowired
-    private TrackPointRepository trackPointRepository;
+    private TripService tripService;
 
     @Override
     public Map<String, Object> generateTripReport(Long userId, Long tripId) {
+        TripDetailVO detail = tripService.getTripDetail(userId, tripId);
         Trip trip = tripRepository.findById(tripId)
                 .orElseThrow(() -> new RuntimeException("行程不存在"));
-        
-        if (!trip.getUserId().equals(userId)) {
-            throw new RuntimeException("无权访问此行程");
-        }
+        Map<String, Object> liveStatistics = tripService.getTripStatistics(tripId);
 
         Map<String, Object> report = new LinkedHashMap<>();
-        
         report.put("reportType", "TRIP_REPORT");
         report.put("generatedAt", DateTimeUtils.formatDateTime(new Date()));
-        
+
+        TripDetailVO.TripSummaryVO summary = detail.getTrip();
         Map<String, Object> overview = new LinkedHashMap<>();
         overview.put("tripId", tripId);
-        overview.put("title", trip.getTitle());
-        overview.put("startTime", DateTimeUtils.formatDateTime(trip.getStartTime()));
-        overview.put("endTime", DateTimeUtils.formatDateTime(trip.getEndTime()));
-        overview.put("distanceText", formatDistance(trip.getDistanceM()));
-        overview.put("durationText", DateTimeUtils.formatDuration(trip.getDurationSec()));
-        overview.put("status", trip.getStatus() != null ? trip.getStatus().name() : null);
+        overview.put("title", summary != null ? summary.getTitle() : trip.getTitle());
+        overview.put("startTime", summary != null ? summary.getStartTime() : DateTimeUtils.formatDateTime(trip.getStartTime()));
+        overview.put("endTime", summary != null ? summary.getEndTime() : DateTimeUtils.formatDateTime(trip.getEndTime()));
+        overview.put("distanceText", summary != null ? summary.getDistanceText() : formatDistance(trip.getDistanceM()));
+        overview.put("durationText", summary != null ? summary.getDurationText() : DateTimeUtils.formatDuration(trip.getDurationSec()));
+        overview.put("status", summary != null && summary.getStatus() != null ? summary.getStatus().name() : (trip.getStatus() != null ? trip.getStatus().name() : null));
         report.put("overview", overview);
 
-        List<PlaceSummary> places = placeSummaryRepository.findByTripId(tripId);
-        List<Map<String, Object>> placeList = places.stream().map(place -> {
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("id", place.getId());
-            item.put("name", place.getPoiName());
-            item.put("city", place.getCity());
-            item.put("district", place.getDistrict());
-            item.put("durationText", DateTimeUtils.formatDuration(place.getDurationSec()));
-            item.put("photoCount", place.getPhotoCount());
-            item.put("videoCount", place.getVideoCount());
-            return item;
-        }).collect(Collectors.toList());
+        List<PlaceSummaryVO> places = detail.getPlaces() != null ? detail.getPlaces() : Collections.emptyList();
+        List<Map<String, Object>> placeList = places.stream()
+                .map(place -> {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("id", place.getId());
+                    item.put("name", place.getPoiName());
+                    item.put("city", place.getCity());
+                    item.put("district", place.getDistrict());
+                    item.put("durationText", place.getDurationText());
+                    item.put("photoCount", place.getPhotoCount() != null ? place.getPhotoCount() : 0);
+                    item.put("videoCount", place.getVideoCount() != null ? place.getVideoCount() : 0);
+                    return item;
+                })
+                .collect(Collectors.toList());
         report.put("places", placeList);
 
-        Long photoCount = photoRepository.countByTripId(tripId);
-        Long videoCount = videoRepository.countByTripId(tripId);
-        Long noteCount = tripNoteRepository.countByTripId(tripId);
-        
         Map<String, Object> statistics = new LinkedHashMap<>();
         statistics.put("placeCount", places.size());
-        statistics.put("photoCount", photoCount);
-        statistics.put("videoCount", videoCount);
-        statistics.put("noteCount", noteCount);
-        statistics.put("totalDistance", trip.getDistanceM());
-        statistics.put("totalDuration", trip.getDurationSec());
+        statistics.put("photoCount", liveStatistics.getOrDefault("photoCount", 0));
+        statistics.put("videoCount", liveStatistics.getOrDefault("videoCount", 0));
+        statistics.put("noteCount", tripNoteRepository.countByTripId(tripId));
+        statistics.put("totalDistance", liveStatistics.getOrDefault("distanceM", 0));
+        statistics.put("totalDuration", liveStatistics.getOrDefault("durationSec", 0));
+        statistics.put("trackPointCount", liveStatistics.getOrDefault("trackPointCount", 0));
         report.put("statistics", statistics);
 
-        List<StoryBlock> blocks = storyBlockRepository.findByTripIdOrderBySortTimeAscSortIndexAsc(tripId);
-        List<Map<String, Object>> storyBlocks = blocks.stream()
-                .filter(block -> !Boolean.TRUE.equals(block.getIsHidden()))
-                .map(this::toStoryBlockMap)
-                .collect(Collectors.toList());
-        report.put("storyBlocks", storyBlocks);
+        List<StoryBlockVO> blocks = detail.getStoryBlocks() != null ? detail.getStoryBlocks() : Collections.emptyList();
+        report.put("storyBlocks", blocks.stream().map(this::toStoryBlockMap).collect(Collectors.toList()));
 
-        tripAiSummaryRepository.findFirstByTripIdAndIsLatestTrueOrderByGeneratedAtDescIdDesc(tripId).ifPresent(aiSummary -> {
+        TripAISummaryVO aiSummary = detail.getAiSummary();
+        if (aiSummary != null) {
             Map<String, Object> aiSummaryMap = new LinkedHashMap<>();
             aiSummaryMap.put("overview", aiSummary.getOverview());
-            aiSummaryMap.put("highlights", aiSummary.getHighlights() != null 
-                    ? Arrays.asList(aiSummary.getHighlights().split("\n")) 
-                    : Collections.emptyList());
+            aiSummaryMap.put("highlights", aiSummary.getHighlights() != null ? aiSummary.getHighlights() : Collections.emptyList());
             aiSummaryMap.put("routeSummary", aiSummary.getRouteSummary());
             aiSummaryMap.put("bestMoment", aiSummary.getBestMoment());
             report.put("aiSummary", aiSummaryMap);
-        });
+        }
 
         return report;
     }
@@ -118,22 +116,20 @@ public class ReportServiceImpl implements ReportService {
 
         Date startDate = parseYearStart(year);
         Date endDate = parseYearEnd(year);
-        
+
         List<Trip> trips = tripRepository.findByUserIdAndStartTimeBetween(userId, startDate, endDate);
-        
+
         Map<String, Object> statistics = new LinkedHashMap<>();
         statistics.put("tripCount", trips.size());
         statistics.put("totalDistance", trips.stream().mapToLong(t -> t.getDistanceM() != null ? t.getDistanceM() : 0L).sum());
         statistics.put("totalDuration", trips.stream().mapToLong(t -> t.getDurationSec() != null ? t.getDurationSec() : 0L).sum());
-        statistics.put("totalPhotos", trips.stream().mapToInt(t -> t.getPhotoCount() != null ? t.getPhotoCount() : 0).sum());
-        statistics.put("totalVideos", trips.stream().mapToInt(t -> t.getVideoCount() != null ? t.getVideoCount() : 0).sum());
         report.put("statistics", statistics);
 
         Set<String> cities = new HashSet<>();
         for (Trip trip : trips) {
             List<PlaceSummary> places = placeSummaryRepository.findByTripId(trip.getId());
             for (PlaceSummary place : places) {
-                if (place.getCity() != null) {
+                if (place.getCity() != null && !place.getCity().isBlank()) {
                     cities.add(place.getCity());
                 }
             }
@@ -168,9 +164,9 @@ public class ReportServiceImpl implements ReportService {
 
         Date startDate = parseMonthStart(year, month);
         Date endDate = parseMonthEnd(year, month);
-        
+
         List<Trip> trips = tripRepository.findByUserIdAndStartTimeBetween(userId, startDate, endDate);
-        
+
         Map<String, Object> statistics = new LinkedHashMap<>();
         statistics.put("tripCount", trips.size());
         statistics.put("totalDistance", trips.stream().mapToLong(t -> t.getDistanceM() != null ? t.getDistanceM() : 0L).sum());
@@ -207,21 +203,24 @@ public class ReportServiceImpl implements ReportService {
         return generateImageBytes(report);
     }
 
-    private Map<String, Object> toStoryBlockMap(StoryBlock block) {
+    private Map<String, Object> toStoryBlockMap(StoryBlockVO block) {
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("id", block.getId());
-        map.put("type", block.getBlockType() != null ? block.getBlockType().name() : null);
-        map.put("title", block.getTitle());
-        map.put("textContent", block.getTextContent());
-        map.put("sortTime", DateTimeUtils.formatDateTime(block.getSortTime()));
-        map.put("coverUrl", block.getCoverObjectKey());
+        map.put("type", block.getType() != null ? block.getType().name() : null);
+        map.put("title", block.getTitle() != null ? block.getTitle() : block.getLocationName());
+        map.put("textContent", block.getText());
+        map.put("sortTime", block.getSortTime());
+        map.put("displayTimeText", block.getDisplayTimeText());
+        map.put("coverUrl", block.getCoverMedia() != null
+                ? (block.getCoverMedia().getThumbnailUrl() != null ? block.getCoverMedia().getThumbnailUrl() : block.getCoverMedia().getUrl())
+                : null);
         return map;
     }
 
     private byte[] generatePdfBytes(Map<String, Object> report) {
         StringBuilder content = new StringBuilder();
         content.append("旅行报告\n\n");
-        
+
         @SuppressWarnings("unchecked")
         Map<String, Object> overview = (Map<String, Object>) report.get("overview");
         if (overview != null) {
@@ -232,12 +231,12 @@ public class ReportServiceImpl implements ReportService {
             content.append("总距离：").append(overview.get("distanceText")).append("\n");
             content.append("总时长：").append(overview.get("durationText")).append("\n\n");
         }
-        
-        return content.toString().getBytes();
+
+        return content.toString().getBytes(StandardCharsets.UTF_8);
     }
 
     private byte[] generateImageBytes(Map<String, Object> report) {
-        return "REPORT_IMAGE_PLACEHOLDER".getBytes();
+        return "REPORT_IMAGE_PLACEHOLDER".getBytes(StandardCharsets.UTF_8);
     }
 
     private String formatDistance(Long meters) {

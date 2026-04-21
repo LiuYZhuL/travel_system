@@ -22,6 +22,9 @@ public class Photo {
     @Column(name = "trip_id")
     private Long tripId;
 
+    @Column(name = "note_id")
+    private Long noteId;
+
     @Column(name = "object_key")
     private String objectKey;
 
@@ -49,6 +52,9 @@ public class Photo {
 
     @Column(name = "user_caption", length = 500)
     private String userCaption;
+
+    @Column(name = "location_name", length = 255)
+    private String locationName;
 
     @Column(name = "privacy_mode")
     @Enumerated(EnumType.STRING)

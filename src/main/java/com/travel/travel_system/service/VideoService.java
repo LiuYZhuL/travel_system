@@ -20,5 +20,5 @@ public interface VideoService {
     Video getVideoAnchor(Long videoId);
 
     void processVideoAsync(Long videoId);
-    Video updateVideoAssistInfo(Long videoId, Long captureTsOverride, Double manualLat, Double manualLng, String coordType);
+    Video updateVideoAssistInfo(Long videoId, Long captureTsOverride, Double manualLat, Double manualLng, String coordType, String locationName, String locationMode);
 }

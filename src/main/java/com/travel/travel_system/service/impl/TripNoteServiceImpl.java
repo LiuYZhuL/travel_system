@@ -122,6 +122,40 @@ public class TripNoteServiceImpl implements TripNoteService {
 
     @Override
     @Transactional
+    public TripNote applyDefaultAnchorAndLocation(Long noteId, Long anchorTs, Double lat, Double lng, String locationName, String coordType, String coordinateSource) {
+        TripNote note = tripNoteRepository.findById(noteId)
+                .orElseThrow(() -> new RuntimeException("绗旇涓嶅瓨鍦紝noteId: " + noteId));
+
+        boolean changed = false;
+        if (note.getAnchorTs() == null && anchorTs != null) {
+            note.setAnchorTs(anchorTs);
+            changed = true;
+        }
+
+        boolean hasLocation = note.getLatEnc() != null && note.getLngEnc() != null;
+        if (!hasLocation && lat != null && lng != null) {
+            note.setLatEnc(encodeDouble(lat));
+            note.setLngEnc(encodeDouble(lng));
+            note.setCoordinateSource(coordinateSource != null && !coordinateSource.isBlank() ? coordinateSource.trim().toUpperCase() : "MEDIA_DEFAULT");
+            note.setCoordType(coordType != null && !coordType.isBlank() ? coordType.trim().toUpperCase() : "GCJ02");
+            changed = true;
+        }
+
+        if ((note.getLocationName() == null || note.getLocationName().isBlank()) && locationName != null && !locationName.isBlank()) {
+            note.setLocationName(locationName.trim());
+            changed = true;
+        }
+
+        if (!changed) {
+            return note;
+        }
+
+        note.setUpdatedAt(new Date());
+        return tripNoteRepository.save(note);
+    }
+
+    @Override
+    @Transactional
     public void deleteNote(Long noteId) {
         tripNoteRepository.deleteById(noteId);
     }

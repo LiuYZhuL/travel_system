@@ -189,6 +189,25 @@ public class MediaAnchorProjectionServiceImpl implements MediaAnchorProjectionSe
             decision.bindingStatus = "PENDING";
         }
 
+        if (facts.manualSource && facts.hasCoord()) {
+            double wgs84Lat = facts.lat;
+            double wgs84Lng = facts.lng;
+            if (facts.coordType == CoordType.GCJ02) {
+                double[] converted = GeoUtils.gcj02ToWgs84(facts.lat, facts.lng);
+                wgs84Lat = converted[0];
+                wgs84Lng = converted[1];
+            }
+            decision.lat = wgs84Lat;
+            decision.lng = wgs84Lng;
+            decision.routeEligible = false;
+            decision.projectionStatus = "MANUAL_FIXED";
+            decision.matchMethod = MatchMethod.MANUAL_PICK;
+            decision.confidence = 0.98f;
+            decision.manualOverride = true;
+            decision.matchedTs = facts.effectiveTs;
+            return decision;
+        }
+
         // 1) 有时间 + 有坐标 + 命中 segment：优先走观测点投影
         if (facts.effectiveTs != null && facts.hasCoord() && segment != null) {
             TrackPointServiceImpl.RouteSupportProjection projection =
@@ -440,15 +459,20 @@ public class MediaAnchorProjectionServiceImpl implements MediaAnchorProjectionSe
                     ? photo.getCaptureTsOverride()
                     : (photo.getShotTimeExif() != null ? photo.getShotTimeExif().getTime() : null);
 
-            byte[] latBytes = photo.getCaptureLatOverride() != null ? photo.getCaptureLatOverride() : photo.getLatEnc();
-            byte[] lngBytes = photo.getCaptureLngOverride() != null ? photo.getCaptureLngOverride() : photo.getLngEnc();
+            boolean ignoreCoord = "NONE".equalsIgnoreCase(photo.getCaptureCoordSource())
+                    && photo.getCaptureLatOverride() == null
+                    && photo.getCaptureLngOverride() == null;
+            byte[] latBytes = ignoreCoord ? null : (photo.getCaptureLatOverride() != null ? photo.getCaptureLatOverride() : photo.getLatEnc());
+            byte[] lngBytes = ignoreCoord ? null : (photo.getCaptureLngOverride() != null ? photo.getCaptureLngOverride() : photo.getLngEnc());
 
             if (latBytes != null && lngBytes != null) {
                 facts.lat = TrackPointServiceImpl.decodeDoubleStatic(latBytes);
                 facts.lng = TrackPointServiceImpl.decodeDoubleStatic(lngBytes);
             }
 
-            if ("WGS84".equalsIgnoreCase(photo.getCaptureCoordType())) {
+            if (ignoreCoord) {
+                facts.coordType = null;
+            } else if ("WGS84".equalsIgnoreCase(photo.getCaptureCoordType())) {
                 facts.coordType = CoordType.WGS84;
             } else if ("GCJ02".equalsIgnoreCase(photo.getCaptureCoordType())) {
                 facts.coordType = CoordType.GCJ02;
@@ -474,15 +498,20 @@ public class MediaAnchorProjectionServiceImpl implements MediaAnchorProjectionSe
                     ? video.getCaptureTsOverride()
                     : (video.getShotTimeExif() != null ? video.getShotTimeExif().getTime() : null);
 
-            byte[] latBytes = video.getCaptureLatOverride() != null ? video.getCaptureLatOverride() : video.getLatEnc();
-            byte[] lngBytes = video.getCaptureLngOverride() != null ? video.getCaptureLngOverride() : video.getLngEnc();
+            boolean ignoreCoord = "NONE".equalsIgnoreCase(video.getCaptureCoordSource())
+                    && video.getCaptureLatOverride() == null
+                    && video.getCaptureLngOverride() == null;
+            byte[] latBytes = ignoreCoord ? null : (video.getCaptureLatOverride() != null ? video.getCaptureLatOverride() : video.getLatEnc());
+            byte[] lngBytes = ignoreCoord ? null : (video.getCaptureLngOverride() != null ? video.getCaptureLngOverride() : video.getLngEnc());
 
             if (latBytes != null && lngBytes != null) {
                 facts.lat = TrackPointServiceImpl.decodeDoubleStatic(latBytes);
                 facts.lng = TrackPointServiceImpl.decodeDoubleStatic(lngBytes);
             }
 
-            if ("WGS84".equalsIgnoreCase(video.getCaptureCoordType())) {
+            if (ignoreCoord) {
+                facts.coordType = null;
+            } else if ("WGS84".equalsIgnoreCase(video.getCaptureCoordType())) {
                 facts.coordType = CoordType.WGS84;
             } else if ("GCJ02".equalsIgnoreCase(video.getCaptureCoordType())) {
                 facts.coordType = CoordType.GCJ02;
