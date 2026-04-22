@@ -1,11 +1,13 @@
 package com.travel.travel_system.service.impl;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.travel.travel_system.model.Anchor;
 import com.travel.travel_system.model.TrackPoint;
 import com.travel.travel_system.repository.AnchorRepository;
 import com.travel.travel_system.repository.TrackPointRepository;
 import com.travel.travel_system.service.HeatmapService;
 import com.travel.travel_system.service.ReverseGeocodingService;
+import com.travel.travel_system.service.pub.RedisService;
 import com.travel.travel_system.utils.GeoUtils;
 import com.travel.travel_system.vo.HeatmapPointVO;
 import com.travel.travel_system.vo.UserHeatmapVO;
@@ -43,6 +45,7 @@ public class HeatmapServiceImpl implements HeatmapService {
     private static final int MAX_OUTPUT_POINTS = 600;
     private static final long MAX_DT_SEC = 300L;
     private static final long CACHE_TTL_MILLIS = TimeUnit.MINUTES.toMillis(10);
+    private static final long CACHE_TTL_SECONDS = TimeUnit.MILLISECONDS.toSeconds(CACHE_TTL_MILLIS);
     private static final int USER_CACHE_MAX_ENTRIES = 64;
     private static final int TRIP_CACHE_MAX_ENTRIES = 128;
     private static final int MAX_SEMANTIC_POINTS = 24;
@@ -58,6 +61,9 @@ public class HeatmapServiceImpl implements HeatmapService {
 
     @Autowired
     private ReverseGeocodingService reverseGeocodingService;
+
+    @Autowired
+    private RedisService redisService;
 
     private final Map<String, CacheEntry<UserHeatmapVO>> userCache = synchronizedLruMap(USER_CACHE_MAX_ENTRIES);
     private final Map<String, CacheEntry<List<HeatmapPointVO>>> tripCache = synchronizedLruMap(TRIP_CACHE_MAX_ENTRIES);
@@ -78,6 +84,12 @@ public class HeatmapServiceImpl implements HeatmapService {
         CacheEntry<UserHeatmapVO> cached = userCache.get(cacheKey);
         if (cached != null && !cached.isExpired()) {
             return deepCopy(cached.value);
+        }
+
+        UserHeatmapVO redisCached = redisService.getJson(cacheKey, UserHeatmapVO.class);
+        if (redisCached != null) {
+            userCache.put(cacheKey, new CacheEntry<>(deepCopy(redisCached), System.currentTimeMillis() + CACHE_TTL_MILLIS));
+            return redisCached;
         }
 
         TimeRange timeRange = resolveTimeRange(normalizedScope);
@@ -102,6 +114,7 @@ public class HeatmapServiceImpl implements HeatmapService {
                 .build();
 
         userCache.put(cacheKey, new CacheEntry<>(deepCopy(result), System.currentTimeMillis() + CACHE_TTL_MILLIS));
+        redisService.setJson(cacheKey, result, CACHE_TTL_SECONDS);
         return result;
     }
 
@@ -116,6 +129,15 @@ public class HeatmapServiceImpl implements HeatmapService {
             return deepCopyPoints(cached.value);
         }
 
+        List<HeatmapPointVO> redisCached = redisService.getJson(
+                cacheKey,
+                new TypeReference<List<HeatmapPointVO>>() {}
+        );
+        if (redisCached != null) {
+            tripCache.put(cacheKey, new CacheEntry<>(deepCopyPoints(redisCached), System.currentTimeMillis() + CACHE_TTL_MILLIS));
+            return deepCopyPoints(redisCached);
+        }
+
         List<TrackPoint> trackPoints = trackPointRepository.findByTripIdOrderByTsAsc(tripId);
         List<Anchor> anchors = anchorRepository.findByTripIdAndProjectionStatusInWithCoords(
                 tripId,
@@ -126,6 +148,7 @@ public class HeatmapServiceImpl implements HeatmapService {
         List<HeatmapPointVO> heatPoints = aggregateHeatmapPointsFromDecoded(mergedPoints, normalizedGrid);
 
         tripCache.put(cacheKey, new CacheEntry<>(deepCopyPoints(heatPoints), System.currentTimeMillis() + CACHE_TTL_MILLIS));
+        redisService.setJson(cacheKey, heatPoints, CACHE_TTL_SECONDS);
         return heatPoints;
     }
 
@@ -134,7 +157,11 @@ public class HeatmapServiceImpl implements HeatmapService {
         if (userId == null) {
             return;
         }
-        userCache.keySet().removeIf(key -> key.startsWith("user:" + userId + ":"));
+        String prefix = "heatmap:user:" + userId + ":";
+        userCache.keySet().removeIf(key -> key.startsWith(prefix));
+        for (String key : redisService.scanKeys(prefix + "*")) {
+            redisService.deleteKey(key);
+        }
     }
 
     @Override
@@ -142,7 +169,11 @@ public class HeatmapServiceImpl implements HeatmapService {
         if (tripId == null) {
             return;
         }
-        tripCache.keySet().removeIf(key -> key.startsWith("trip:" + tripId + ":"));
+        String prefix = "heatmap:trip:" + tripId + ":";
+        tripCache.keySet().removeIf(key -> key.startsWith(prefix));
+        for (String key : redisService.scanKeys(prefix + "*")) {
+            redisService.deleteKey(key);
+        }
     }
 
 
@@ -593,11 +624,11 @@ public class HeatmapServiceImpl implements HeatmapService {
     }
 
     private String buildUserCacheKey(Long userId, String scope, int gridMeters) {
-        return "user:" + userId + ':' + scope + ':' + gridMeters;
+        return "heatmap:user:" + userId + ':' + scope + ':' + gridMeters;
     }
 
     private String buildTripCacheKey(Long tripId, int gridMeters) {
-        return "trip:" + tripId + ':' + gridMeters;
+        return "heatmap:trip:" + tripId + ':' + gridMeters;
     }
 
     private int normalizeGridMeters(Integer gridMeters) {

@@ -76,6 +76,41 @@ public class RedisService {
         }
     }
 
+    public void setJson(String key, Object value, long expirationSeconds) {
+        try {
+            String json = objectMapper.writeValueAsString(value);
+            redisTemplate.opsForValue().set(key, json, expirationSeconds, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            logger.error("Redis setJson 失败, key={}: {}", key, e.getMessage(), e);
+        }
+    }
+
+    public <T> T getJson(String key, Class<T> clazz) {
+        try {
+            String json = redisTemplate.opsForValue().get(key);
+            if (json == null || json.isBlank()) {
+                return null;
+            }
+            return objectMapper.readValue(json, clazz);
+        } catch (Exception e) {
+            logger.error("Redis getJson 失败, key={}: {}", key, e.getMessage(), e);
+            return null;
+        }
+    }
+
+    public <T> T getJson(String key, TypeReference<T> typeReference) {
+        try {
+            String json = redisTemplate.opsForValue().get(key);
+            if (json == null || json.isBlank()) {
+                return null;
+            }
+            return objectMapper.readValue(json, typeReference);
+        } catch (Exception e) {
+            logger.error("Redis getJson 失败, key={}: {}", key, e.getMessage(), e);
+            return null;
+        }
+    }
+
 
     public boolean setIfAbsent(String key, String value, long expirationSeconds) {
         try {

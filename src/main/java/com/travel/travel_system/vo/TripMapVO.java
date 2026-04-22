@@ -7,6 +7,7 @@ import lombok.NoArgsConstructor;
 
 import java.io.Serializable;
 import java.util.List;
+import java.util.Map;
 
 @Data
 @Builder
@@ -43,6 +44,7 @@ public class TripMapVO implements Serializable {
      * 媒体锚点 marker（照片/视频）
      */
     private List<MapMarkerVO> mediaMarkers;
+    private Map<String, Object> matchingDiagnostics;
     private String routeSource;
     private String routeSyncStatus;
     private String routeGeneratedAt;

@@ -1,14 +1,18 @@
 package com.travel.travel_system.controller;
 
 import com.travel.travel_system.model.StoryBlock;
+import com.travel.travel_system.model.enums.BlockType;
 import com.travel.travel_system.repository.StoryBlockRepository;
 import com.travel.travel_system.service.AiService;
+import com.travel.travel_system.service.TripService;
 import com.travel.travel_system.utils.ApiResponse;
+import com.travel.travel_system.utils.DateTimeUtils;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
+import java.text.SimpleDateFormat;
 
 @RestController
 @RequestMapping("/api/v1")
@@ -19,6 +23,9 @@ public class StoryBlockController extends BaseController {
 
     @Autowired
     private AiService aiService;
+
+    @Autowired
+    private TripService tripService;
 
     @PostMapping("/trips/{tripId}/story-blocks")
     public ApiResponse<?> createStoryBlock(@PathVariable Long tripId,
@@ -74,6 +81,56 @@ public class StoryBlockController extends BaseController {
             return success(toBlockVO(saved));
         } catch (Exception e) {
             return error("SYSTEM_500", "修改故事块失败：" + e.getMessage());
+        }
+    }
+
+    @PutMapping("/trips/{tripId}/story-blocks/override")
+    public ApiResponse<?> upsertStoryBlockOverride(@PathVariable Long tripId,
+                                                   @RequestBody Map<String, Object> request,
+                                                   HttpServletRequest httpRequest) {
+        try {
+            Long userId = requireUserId(httpRequest);
+            tripService.getUserTripOrThrow(userId, tripId);
+
+            String refType = asString(request.get("refType"));
+            Long refId = asLong(request.get("refId"));
+            if (refType == null || refType.trim().isEmpty() || refId == null) {
+                return error("VALID_001", "refType 和 refId 不能为空");
+            }
+
+            StoryBlock block = storyBlockRepository.findFirstByTripIdAndRefTypeAndRefId(tripId, refType.trim(), refId)
+                    .orElseGet(() -> {
+                        StoryBlock created = new StoryBlock();
+                        created.setUserId(userId);
+                        created.setTripId(tripId);
+                        created.setRefType(refType.trim());
+                        created.setRefId(refId);
+                        created.setBlockType(resolveOverrideBlockType(refType));
+                        created.setCreatedAt(new Date());
+                        return created;
+                    });
+
+            String title = asString(request.get("title"));
+            String textContent = asString(request.get("textContent"));
+            Boolean isHidden = asBoolean(request.get("isHidden"));
+            Integer sortIndex = asInteger(request.get("sortIndex"));
+            Date sortTime = parseDateTime(asString(request.get("sortTime")));
+
+            block.setTitle(title);
+            block.setTextContent(textContent);
+            block.setIsHidden(isHidden != null ? isHidden : Boolean.FALSE);
+            block.setSortIndex(sortIndex != null ? sortIndex : 0);
+            if (sortTime != null) {
+                block.setSortTime(sortTime);
+            } else if (block.getSortTime() == null) {
+                block.setSortTime(new Date());
+            }
+            block.setUpdatedAt(new Date());
+
+            StoryBlock saved = storyBlockRepository.save(block);
+            return success(toBlockVO(saved));
+        } catch (Exception e) {
+            return error("SYSTEM_500", "保存故事流编辑结果失败：" + e.getMessage());
         }
     }
 
@@ -207,6 +264,31 @@ public class StoryBlockController extends BaseController {
             return (Boolean) value;
         }
         return Boolean.parseBoolean(String.valueOf(value));
+    }
+
+    private Date parseDateTime(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).parse(value.trim());
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private BlockType resolveOverrideBlockType(String refType) {
+        if (refType == null) {
+            return BlockType.TEXT;
+        }
+        return switch (refType.trim().toUpperCase(Locale.ROOT)) {
+            case "PHOTO" -> BlockType.PHOTO;
+            case "VIDEO" -> BlockType.VIDEO;
+            case "PLACE_SUMMARY" -> BlockType.PLACE_SUMMARY;
+            case "TRIP_NOTE" -> BlockType.TEXT;
+            case "TRIP_START", "TRIP_END" -> BlockType.TEXT;
+            default -> BlockType.TEXT;
+        };
     }
 
     private Map<String, Object> toBlockVO(StoryBlock block) {

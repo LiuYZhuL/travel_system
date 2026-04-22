@@ -386,6 +386,7 @@ public class TripServiceImpl implements TripService {
         TripMediaCounts mediaCounts = resolveTripMediaCounts(tripId);
         statistics.put("photoCount", mediaCounts.photoCount());
         statistics.put("videoCount", mediaCounts.videoCount());
+        statistics.put("noteCount", (int) tripNoteRepository.countByTripId(tripId));
         statistics.put("placeCount", (int) placeSummaryRepository.countByTripId(tripId));
         statistics.put("trackPointCount", (int) trackPointRepository.countByTripId(tripId));
         statistics.put("anchorCount", (int) anchorRepository.countByTripId(tripId));
@@ -514,6 +515,7 @@ public class TripServiceImpl implements TripService {
                 .reconstructedSegments(routePayload.reconstructedSegments)
                 .markers(buildMapMarkers(tripId, displayCoordType, trackPoints))
                 .mediaMarkers(mediaMarkers)
+                .matchingDiagnostics(routePayload.matchingDiagnostics)
                 .routeSource(routePayload.routeSource)
                 .routeSyncStatus(routePayload.routeSyncStatus)
                 .routeGeneratedAt(routePayload.routeGeneratedAt)
@@ -905,6 +907,7 @@ public class TripServiceImpl implements TripService {
         if (selectedPayload != null) {
             payload.matchedPolyline = buildMatchedPolylineForMap(selectedPayload.getMatchedResults(), displayCoordType);
             payload.reconstructedPolyline = buildReconstructedPolylineForMap(selectedPayload.getMatchedResults(), displayCoordType);
+            payload.matchingDiagnostics = buildMatchingDiagnostics(selectedPayload);
             if (selectedPayload.getGeneratedAt() != null) {
                 payload.routeGeneratedAt = DateTimeUtils.formatDateTime(new Date(selectedPayload.getGeneratedAt()));
             }
@@ -932,6 +935,92 @@ public class TripServiceImpl implements TripService {
         }
 
         return payload;
+    }
+
+    private Map<String, Object> buildMatchingDiagnostics(TripRouteSnapshotPayload payload) {
+        if (payload == null || payload.getMatchedResults() == null || payload.getMatchedResults().isEmpty()) {
+            return null;
+        }
+
+        List<MapMatchingResult> results = payload.getMatchedResults();
+        int totalPoints = results.size();
+        int roadMatchedPoints = 0;
+        int rawRetainedPoints = 0;
+        int highOffsetPoints = 0;
+        double offsetSum = 0.0;
+        List<Double> offsets = new ArrayList<>();
+        Map<String, Integer> modeBreakdown = new LinkedHashMap<>();
+        Map<String, Integer> reasonBreakdown = new LinkedHashMap<>();
+
+        for (MapMatchingResult result : results) {
+            String matchMode = StringUtils.hasText(result.getMatchMode()) ? result.getMatchMode().trim().toUpperCase(Locale.ROOT) : "UNKNOWN";
+            modeBreakdown.merge(matchMode, 1, Integer::sum);
+            if ("RAW".equals(matchMode)) {
+                rawRetainedPoints += 1;
+            }
+            if ("ROAD".equals(matchMode)) {
+                roadMatchedPoints += 1;
+            }
+
+            if (StringUtils.hasText(result.getMatchReason())) {
+                reasonBreakdown.merge(result.getMatchReason().trim().toUpperCase(Locale.ROOT), 1, Integer::sum);
+            }
+
+            double offset = result.getRoadDistanceMeters() == null ? Double.NaN : result.getRoadDistanceMeters();
+            if (Double.isFinite(offset)) {
+                offsets.add(offset);
+                offsetSum += offset;
+                if (offset >= 15.0) {
+                    highOffsetPoints += 1;
+                }
+            }
+        }
+
+        Collections.sort(offsets);
+        double matchedRate = totalPoints == 0 ? 0.0 : roadMatchedPoints * 100.0 / totalPoints;
+        double rawRate = totalPoints == 0 ? 0.0 : rawRetainedPoints * 100.0 / totalPoints;
+        double avgOffset = offsets.isEmpty() ? 0.0 : offsetSum / offsets.size();
+
+        Map<String, Object> diagnostics = new LinkedHashMap<>();
+        diagnostics.put("available", Boolean.TRUE);
+        diagnostics.put("algoVersion", payload.getAlgoVersion());
+        diagnostics.put("totalPoints", totalPoints);
+        diagnostics.put("roadMatchedPoints", roadMatchedPoints);
+        diagnostics.put("rawRetainedPoints", rawRetainedPoints);
+        diagnostics.put("roadMatchedRate", roundMetric(matchedRate));
+        diagnostics.put("rawRetainedRate", roundMetric(rawRate));
+        diagnostics.put("avgRoadOffsetMeters", roundMetric(avgOffset));
+        diagnostics.put("medianRoadOffsetMeters", roundMetric(percentile(offsets, 0.5)));
+        diagnostics.put("p90RoadOffsetMeters", roundMetric(percentile(offsets, 0.9)));
+        diagnostics.put("highOffsetPoints", highOffsetPoints);
+        diagnostics.put("modeBreakdown", modeBreakdown);
+        diagnostics.put("reasonBreakdown", reasonBreakdown);
+        diagnostics.put("generatedAt", payload.getGeneratedAt() == null ? null : DateTimeUtils.formatDateTime(new Date(payload.getGeneratedAt())));
+        return diagnostics;
+    }
+
+    private double percentile(List<Double> sortedValues, double percentile) {
+        if (sortedValues == null || sortedValues.isEmpty()) {
+            return 0.0;
+        }
+        if (sortedValues.size() == 1) {
+            return sortedValues.get(0);
+        }
+        double index = Math.max(0.0, Math.min(1.0, percentile)) * (sortedValues.size() - 1);
+        int lower = (int) Math.floor(index);
+        int upper = (int) Math.ceil(index);
+        if (lower == upper) {
+            return sortedValues.get(lower);
+        }
+        double weight = index - lower;
+        return sortedValues.get(lower) * (1.0 - weight) + sortedValues.get(upper) * weight;
+    }
+
+    private double roundMetric(double value) {
+        if (!Double.isFinite(value)) {
+            return 0.0;
+        }
+        return Math.round(value * 100.0) / 100.0;
     }
 
     private boolean isSnapshotRefreshInProgress(Long tripId) {
@@ -1103,7 +1192,100 @@ public class TripServiceImpl implements TripService {
                 .thenComparingInt(StoryTimelineItem::order)
                 .thenComparing(item -> item.block().getId(), Comparator.nullsLast(String::compareTo)));
 
-        return timeline.stream().map(StoryTimelineItem::block).collect(Collectors.toList());
+        List<StoryBlockVO> blocks = timeline.stream().map(StoryTimelineItem::block).collect(Collectors.toList());
+        return applyStoryOverrides(blocks, tripId);
+    }
+
+    private List<StoryBlockVO> applyStoryOverrides(List<StoryBlockVO> blocks, Long tripId) {
+        if (blocks == null || blocks.isEmpty() || tripId == null) {
+            return blocks == null ? Collections.emptyList() : blocks;
+        }
+
+        Map<String, StoryBlock> overrideMap = new HashMap<>();
+        for (StoryBlock override : storyBlockRepository.findByTripIdOrderBySortTimeAscSortIndexAsc(tripId)) {
+            if (override == null || !StringUtils.hasText(override.getRefType()) || override.getRefId() == null) {
+                continue;
+            }
+            overrideMap.put(new StoryRef(override.getRefType().trim().toUpperCase(Locale.ROOT), override.getRefId()).key(), override);
+        }
+
+        List<StoryBlockVO> resolved = new ArrayList<>();
+        for (StoryBlockVO block : blocks) {
+            StoryRef ref = resolveStoryRef(block == null ? null : block.getId(), tripId);
+            if (block == null || ref == null) {
+                if (block != null) {
+                    resolved.add(block);
+                }
+                continue;
+            }
+            StoryBlock override = overrideMap.get(ref.key());
+            if (override == null) {
+                resolved.add(block);
+                continue;
+            }
+            if (Boolean.TRUE.equals(override.getIsHidden())) {
+                continue;
+            }
+            resolved.add(StoryBlockVO.builder()
+                    .id(block.getId())
+                    .tripId(block.getTripId())
+                    .type(block.getType())
+                    .sortTime(override.getSortTime() != null ? DateTimeUtils.formatDateTime(override.getSortTime()) : block.getSortTime())
+                    .displayTimeText(override.getSortTime() != null ? DateTimeUtils.formatTime(override.getSortTime()) : block.getDisplayTimeText())
+                    .locationName(block.getLocationName())
+                    .point(block.getPoint())
+                    .title(StringUtils.hasText(override.getTitle()) ? override.getTitle() : block.getTitle())
+                    .text(StringUtils.hasText(override.getTextContent()) ? override.getTextContent() : block.getText())
+                    .coverMedia(block.getCoverMedia())
+                    .mediaList(block.getMediaList())
+                    .placeId(block.getPlaceId())
+                    .relatedPlace(block.getRelatedPlace())
+                    .moodTags(block.getMoodTags())
+                    .build());
+        }
+        return resolved;
+    }
+
+    private StoryRef resolveStoryRef(String blockId, Long tripId) {
+        if (!StringUtils.hasText(blockId)) {
+            return null;
+        }
+        if (blockId.startsWith("trip-start-")) {
+            return new StoryRef("TRIP_START", tripId);
+        }
+        if (blockId.startsWith("trip-end-")) {
+            return new StoryRef("TRIP_END", tripId);
+        }
+        if (blockId.startsWith("place-")) {
+            return new StoryRef("PLACE_SUMMARY", parseStoryRefId(blockId.substring("place-".length())));
+        }
+        if (blockId.startsWith("photo-")) {
+            return new StoryRef("PHOTO", parseStoryRefId(blockId.substring("photo-".length())));
+        }
+        if (blockId.startsWith("video-")) {
+            return new StoryRef("VIDEO", parseStoryRefId(blockId.substring("video-".length())));
+        }
+        if (blockId.startsWith("note-")) {
+            return new StoryRef("TRIP_NOTE", parseStoryRefId(blockId.substring("note-".length())));
+        }
+        return null;
+    }
+
+    private Long parseStoryRefId(String rawId) {
+        if (!StringUtils.hasText(rawId)) {
+            return null;
+        }
+        try {
+            return Long.parseLong(rawId.trim());
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private record StoryRef(String refType, Long refId) {
+        private String key() {
+            return (refType == null ? "" : refType) + ":" + refId;
+        }
     }
 
     private String resolveStoryMediaSortTime(MediaAssetVO media) {
@@ -2065,6 +2247,7 @@ public class TripServiceImpl implements TripService {
         private TrackPolylineVO reconstructedPolyline;
         private List<TrackPolylineVO> matchedSegments;
         private List<TrackPolylineVO> reconstructedSegments;
+        private Map<String, Object> matchingDiagnostics;
         private String routeSource;
         private String routeSyncStatus;
         private String routeGeneratedAt;

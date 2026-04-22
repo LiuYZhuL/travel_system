@@ -9,6 +9,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Optional;
 
 @Repository
 public interface StoryBlockRepository extends JpaRepository<StoryBlock, Long> {
@@ -91,4 +92,6 @@ public interface StoryBlockRepository extends JpaRepository<StoryBlock, Long> {
      * 查询故事块的最后一个块
      */
     StoryBlock findFirstByTripIdOrderBySortTimeDescSortIndexDesc(Long tripId);
+
+    Optional<StoryBlock> findFirstByTripIdAndRefTypeAndRefId(Long tripId, String refType, Long refId);
 }

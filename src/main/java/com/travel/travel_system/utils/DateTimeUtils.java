@@ -102,4 +102,18 @@ public final class DateTimeUtils {
         }
         return String.format("%.1fkm", meters / 1000.0);
     }
+
+    public static Date parseDateTime(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+
+        try {
+            SimpleDateFormat sdf = new SimpleDateFormat(DATETIME_PATTERN);
+            sdf.setTimeZone(DEFAULT_TIMEZONE);
+            return sdf.parse(value);
+        } catch (Exception e) {
+            throw new RuntimeException("日期时间解析失败: " + value, e);
+        }
+    }
 }
