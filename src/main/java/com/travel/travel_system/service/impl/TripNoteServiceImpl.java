@@ -23,9 +23,7 @@ public class TripNoteServiceImpl implements TripNoteService {
         if (note.getCreatedAt() == null) {
             note.setCreatedAt(new Date());
         }
-        if (note.getPrivacyMode() == null) {
-            note.setPrivacyMode("PUBLIC");
-        }
+        note.setPrivacyMode(normalizePrivacyMode(note.getPrivacyMode()));
         return tripNoteRepository.save(note);
     }
 
@@ -72,7 +70,7 @@ public class TripNoteServiceImpl implements TripNoteService {
             note.setContent(content);
         }
         if (privacyMode != null && !privacyMode.trim().isEmpty()) {
-            note.setPrivacyMode(privacyMode);
+            note.setPrivacyMode(normalizePrivacyMode(privacyMode));
         }
         note.setUpdatedAt(new Date());
 
@@ -178,5 +176,16 @@ public class TripNoteServiceImpl implements TripNoteService {
             bytes[i] = (byte) ((bits >> (i * 8)) & 0xFF);
         }
         return bytes;
+    }
+
+    private String normalizePrivacyMode(String privacyMode) {
+        if (privacyMode == null || privacyMode.trim().isEmpty()) {
+            return "PUBLIC";
+        }
+        String normalized = privacyMode.trim().toUpperCase();
+        return switch (normalized) {
+            case "PUBLIC", "MASKED", "PRIVATE" -> normalized;
+            default -> "PUBLIC";
+        };
     }
 }

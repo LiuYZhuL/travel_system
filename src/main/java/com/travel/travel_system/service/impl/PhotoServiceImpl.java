@@ -44,6 +44,8 @@ public class PhotoServiceImpl implements PhotoService {
     private OssService ossService;
     @Autowired
     private MediaAnchorProjectionService mediaAnchorProjectionService;
+    @Autowired
+    private TripAggregationRefreshService tripAggregationRefreshService;
 
     @Override
     @Transactional
@@ -91,6 +93,7 @@ public class PhotoServiceImpl implements PhotoService {
 
         // 统一走投影服务，不再在这里手工创建占位 Anchor
         mediaAnchorProjectionService.projectPhotoAnchor(savedPhoto.getId(), tripId);
+        tripAggregationRefreshService.markTripDirty(tripId, "PHOTO_UPLOAD");
 
         return savedPhoto;
     }
@@ -138,6 +141,7 @@ public class PhotoServiceImpl implements PhotoService {
         // 如果你后面扩展了“手动填写时间/手动打点”，在保存 override 字段后
         // 再调用一次：
         // mediaAnchorProjectionService.projectPhotoAnchor(saved.getId(), saved.getTripId());
+        tripAggregationRefreshService.markTripDirty(saved.getTripId(), "PHOTO_UPDATE");
 
         return saved;
     }
@@ -163,6 +167,7 @@ public class PhotoServiceImpl implements PhotoService {
 
         photoRepository.delete(photo);
         refreshTripMediaCounts(photo.getTripId());
+        tripAggregationRefreshService.markTripDirty(photo.getTripId(), "PHOTO_DELETE");
     }
 
     @Override
@@ -211,6 +216,7 @@ public class PhotoServiceImpl implements PhotoService {
         }
 
         Photo saved = photoRepository.save(photo);
+        tripAggregationRefreshService.markTripDirty(saved.getTripId(), "PHOTO_ASSIST_UPDATE");
 
         // 用户补时间 / 手动打点后，立即重投影
         mediaAnchorProjectionService.projectPhotoAnchor(saved.getId(), saved.getTripId());

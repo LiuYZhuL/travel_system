@@ -8,6 +8,7 @@ import com.travel.travel_system.repository.PhotoRepository;
 import com.travel.travel_system.repository.VideoRepository;
 import com.travel.travel_system.service.TripNoteService;
 import com.travel.travel_system.service.TripService;
+import com.travel.travel_system.service.impl.TripAggregationRefreshService;
 import com.travel.travel_system.utils.ApiResponse;
 import com.travel.travel_system.utils.DateTimeUtils;
 import com.travel.travel_system.utils.GeoUtils;
@@ -41,6 +42,8 @@ public class NoteController extends BaseController {
 
     @Autowired
     private VideoRepository videoRepository;
+    @Autowired
+    private TripAggregationRefreshService tripAggregationRefreshService;
 
     @PostMapping("/trips/{tripId}/notes")
     public ApiResponse<?> createNote(@PathVariable Long tripId,
@@ -86,6 +89,7 @@ public class NoteController extends BaseController {
             TripNote saved = tripNoteService.createNote(note);
             syncNoteMedia(saved, photoIds, videoIds);
             saved = applyMediaDefaultsIfAbsent(saved);
+            tripAggregationRefreshService.markTripDirty(tripId, "NOTE_CREATE");
 
             return success(toNoteVO(saved));
         } catch (Exception e) {
@@ -178,6 +182,7 @@ public class NoteController extends BaseController {
             }
             syncNoteMedia(updated, photoIds, videoIds);
             updated = applyMediaDefaultsIfAbsent(updated);
+            tripAggregationRefreshService.markTripDirty(note.getTripId(), "NOTE_UPDATE");
 
             return success(toNoteVO(updated));
         } catch (Exception e) {
@@ -198,6 +203,7 @@ public class NoteController extends BaseController {
 
             detachNoteMedia(noteId);
             tripNoteService.deleteNote(noteId);
+            tripAggregationRefreshService.markTripDirty(note.getTripId(), "NOTE_DELETE");
             return success(Map.of("noteId", noteId));
         } catch (Exception e) {
             return error("SYSTEM_500", "删除笔记失败：" + e.getMessage());
@@ -231,6 +237,7 @@ public class NoteController extends BaseController {
 
             TripNote updated = tripNoteService.updateAnchor(noteId, note.getAnchorTs(), latEnc, lngEnc);
             updated = tripNoteService.updateLocation(noteId, lat, lng, locationName, coordType);
+            tripAggregationRefreshService.markTripDirty(note.getTripId(), "NOTE_LOCATION_UPDATE");
 
             return success(toNoteVO(updated));
         } catch (Exception e) {
@@ -320,8 +327,8 @@ public class NoteController extends BaseController {
 
     private Map<String, Object> toNoteVO(TripNote note) {
         Map<String, Object> vo = new LinkedHashMap<>();
-        vo.put("id", note.getId());
-        vo.put("tripId", note.getTripId());
+        vo.put("id", stringifyId(note.getId()));
+        vo.put("tripId", stringifyId(note.getTripId()));
         vo.put("title", note.getTitle());
         vo.put("content", note.getContent());
         vo.put("privacyMode", note.getPrivacyMode());
@@ -413,7 +420,7 @@ public class NoteController extends BaseController {
 
     private Map<String, Object> toPhotoMediaItem(Photo photo) {
         Map<String, Object> item = new LinkedHashMap<>();
-        item.put("id", photo.getId());
+        item.put("id", stringifyId(photo.getId()));
         item.put("type", "photo");
         item.put("url", photo.getObjectKey());
         item.put("thumbnailUrl", photo.getObjectKey());
@@ -430,7 +437,7 @@ public class NoteController extends BaseController {
 
     private Map<String, Object> toVideoMediaItem(Video video) {
         Map<String, Object> item = new LinkedHashMap<>();
-        item.put("id", video.getId());
+        item.put("id", stringifyId(video.getId()));
         item.put("type", "video");
         item.put("url", video.getObjectKey());
         item.put("thumbnailUrl", video.getThumbnailObjectKey());
@@ -482,6 +489,10 @@ public class NoteController extends BaseController {
             updated.setLocationName(locationCandidate.locationName());
         }
         return updated;
+    }
+
+    private String stringifyId(Long value) {
+        return value == null ? null : String.valueOf(value);
     }
 
     private NoteMediaDefaultCandidate buildPhotoDefaultCandidate(Photo photo) {

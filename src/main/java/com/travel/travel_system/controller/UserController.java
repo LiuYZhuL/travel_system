@@ -57,6 +57,9 @@ public class UserController extends BaseController {
             profile.put("defaultPrivacyMode", user.getDefaultPrivacyMode() != null
                     ? user.getDefaultPrivacyMode().toString()
                     : PrivacyMode.PRIVATE.toString());
+            profile.put("privacyAgreementAccepted", userService.hasAcceptedCurrentPrivacyAgreement(user));
+            profile.put("privacyAgreementVersion", userService.getCurrentPrivacyAgreementVersion());
+            profile.put("privacyAgreementAcceptedAt", DateTimeUtils.formatDateTime(user.getPrivacyAgreementAcceptedAt()));
             profile.put("createdAt", DateTimeUtils.formatDateTime(user.getCreatedAt()));
             homeData.put("profile", profile);
             homeData.put("stats", tripService.getUserTripStats(user.getId()));
@@ -89,6 +92,9 @@ public class UserController extends BaseController {
             userData.put("defaultPrivacyMode", user.getDefaultPrivacyMode() != null
                     ? user.getDefaultPrivacyMode().toString()
                     : PrivacyMode.PRIVATE.toString());
+            userData.put("privacyAgreementAccepted", userService.hasAcceptedCurrentPrivacyAgreement(user));
+            userData.put("privacyAgreementVersion", userService.getCurrentPrivacyAgreementVersion());
+            userData.put("privacyAgreementAcceptedAt", DateTimeUtils.formatDateTime(user.getPrivacyAgreementAcceptedAt()));
             userData.put("createdAt", DateTimeUtils.formatDateTime(user.getCreatedAt()));
             return success(userData);
         } catch (Exception e) {
@@ -124,6 +130,9 @@ public class UserController extends BaseController {
             userData.put("defaultPrivacyMode", updatedUser.getDefaultPrivacyMode() != null
                     ? updatedUser.getDefaultPrivacyMode().toString()
                     : PrivacyMode.PRIVATE.toString());
+            userData.put("privacyAgreementAccepted", userService.hasAcceptedCurrentPrivacyAgreement(updatedUser));
+            userData.put("privacyAgreementVersion", userService.getCurrentPrivacyAgreementVersion());
+            userData.put("privacyAgreementAcceptedAt", DateTimeUtils.formatDateTime(updatedUser.getPrivacyAgreementAcceptedAt()));
             userData.put("updatedAt", DateTimeUtils.formatDateTime(updatedUser.getUpdatedAt()));
             return success(userData);
         } catch (Exception e) {
@@ -244,6 +253,28 @@ public class UserController extends BaseController {
             return success(data);
         } catch (Exception e) {
             return error("SYSTEM_500", "更新默认隐私模式失败：" + e.getMessage());
+        }
+    }
+
+    @PatchMapping("/settings/privacy-agreement")
+    public ApiResponse<?> acceptPrivacyAgreement(@RequestBody(required = false) Map<String, Object> request,
+                                                 HttpServletRequest httpRequest) {
+        try {
+            Long userId = (Long) httpRequest.getAttribute("userId");
+            if (userId == null) {
+                return error("AUTH_001", "鏈巿鏉冭闂?");
+            }
+
+            String agreementVersion = request == null ? null : asString(request.get("privacyAgreementVersion"));
+            User updatedUser = userService.acceptPrivacyAgreement(userId, agreementVersion);
+
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("privacyAgreementAccepted", userService.hasAcceptedCurrentPrivacyAgreement(updatedUser));
+            data.put("privacyAgreementVersion", userService.getCurrentPrivacyAgreementVersion());
+            data.put("privacyAgreementAcceptedAt", DateTimeUtils.formatDateTime(updatedUser.getPrivacyAgreementAcceptedAt()));
+            return success(data);
+        } catch (Exception e) {
+            return error("SYSTEM_500", "鏇存柊闅愮鍗忚鐘舵€佸け璐ワ細" + e.getMessage());
         }
     }
 

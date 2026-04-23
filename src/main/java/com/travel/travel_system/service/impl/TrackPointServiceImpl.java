@@ -115,6 +115,8 @@ public class TrackPointServiceImpl implements TrackPointService {
 
     @Autowired
     private TripSegmentRepository tripSegmentRepository;
+    @Autowired
+    private TripAggregationRefreshService tripAggregationRefreshService;
 
     /**
      * 新路网读取体系直接使用重构后的 RoadGraphService，
@@ -2121,6 +2123,7 @@ public class TrackPointServiceImpl implements TrackPointService {
             return;
         }
         redisService.setString(dirtyKey(tripId), "1", MATCH_DIRTY_TTL_SECONDS);
+        tripAggregationRefreshService.markTripDirty(tripId, "TRACK_MATCH_DIRTY");
         log.warn("[TRACK_MATCH_DIRTY] mark tripId={}", tripId);
     }
 

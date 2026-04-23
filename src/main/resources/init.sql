@@ -12,6 +12,9 @@ CREATE TABLE IF NOT EXISTS user (
   nickname VARCHAR(255) DEFAULT NULL COMMENT '用户昵称',
   avatar_url VARCHAR(255) DEFAULT NULL COMMENT '用户头像URL',
   default_privacy_mode ENUM('PUBLIC', 'MASKED', 'PRIVATE') NOT NULL COMMENT '默认隐私模式',
+  privacy_agreement_accepted TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已同意当前隐私协议',
+  privacy_agreement_version VARCHAR(32) DEFAULT NULL COMMENT '已同意的隐私协议版本',
+  privacy_agreement_accepted_at DATETIME DEFAULT NULL COMMENT '同意隐私协议的时间',
   created_at DATETIME NOT NULL COMMENT '创建时间',
   updated_at DATETIME NOT NULL COMMENT '更新时间'
 );

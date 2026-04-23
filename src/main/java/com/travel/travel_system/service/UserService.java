@@ -62,6 +62,21 @@ public interface UserService {
     Optional<User> getUserInfo(Long userId);
 
     /**
+     * 获取当前隐私协议版本
+     */
+    String getCurrentPrivacyAgreementVersion();
+
+    /**
+     * 判断用户是否已同意当前版本隐私协议
+     */
+    boolean hasAcceptedCurrentPrivacyAgreement(User user);
+
+    /**
+     * 记录用户同意隐私协议
+     */
+    User acceptPrivacyAgreement(Long userId, String agreementVersion);
+
+    /**
      * 更新用户隐私设置
      * @param userId 用户 ID
      * @param privacyMode 隐私模式

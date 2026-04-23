@@ -6,6 +6,7 @@ import com.travel.travel_system.model.enums.CoordType;
 import com.travel.travel_system.model.enums.PrivacyMode;
 import com.travel.travel_system.service.PlaceSummaryService;
 import com.travel.travel_system.service.TripService;
+import com.travel.travel_system.service.impl.TripAggregationRefreshService;
 import com.travel.travel_system.utils.ApiResponse;
 import com.travel.travel_system.utils.GeoUtils;
 import com.travel.travel_system.vo.PlaceSummaryVO;
@@ -31,6 +32,8 @@ public class PlaceController extends BaseController {
 
     @Autowired
     private TripService tripService;
+    @Autowired
+    private TripAggregationRefreshService tripAggregationRefreshService;
 
     @GetMapping("/{tripId}/places/{placeId}")
     public ApiResponse<?> getPlaceDetail(@PathVariable Long tripId,
@@ -107,6 +110,7 @@ public class PlaceController extends BaseController {
             if (shouldRefreshSemantic) {
                 placeSummaryService.refreshSemanticInfoForTrip(tripId);
             }
+            tripAggregationRefreshService.markTripDirty(tripId, "PLACE_CREATE");
 
             return success(buildPlaceDetail(userId, tripId, saved.getId()));
         } catch (Exception e) {
@@ -200,6 +204,7 @@ public class PlaceController extends BaseController {
             if (locationChanged && !poiProvided) {
                 placeSummaryService.refreshSemanticInfoForTrip(tripId);
             }
+            tripAggregationRefreshService.markTripDirty(tripId, "PLACE_UPDATE");
 
             return success(buildPlaceDetail(userId, tripId, saved.getId()));
         } catch (Exception e) {
@@ -216,6 +221,7 @@ public class PlaceController extends BaseController {
             tripService.getUserTripOrThrow(userId, tripId);
             requirePlaceInTrip(tripId, placeId);
             placeSummaryService.deletePlaceSummary(placeId);
+            tripAggregationRefreshService.markTripDirty(tripId, "PLACE_DELETE");
             return success(Map.of("tripId", tripId, "placeId", placeId));
         } catch (Exception e) {
             return error("SYSTEM_500", "删除地点失败：" + e.getMessage());

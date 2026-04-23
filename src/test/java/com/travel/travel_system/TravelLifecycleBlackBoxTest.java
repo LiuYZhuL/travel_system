@@ -31,6 +31,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.net.URI;
@@ -59,6 +60,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
         "geocoding.max-retries=0",
         "logging.level.root=warn"
 })
+@Transactional
 class TravelLifecycleBlackBoxTest {
 
     private static final DateTimeFormatter DATETIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
@@ -121,19 +123,23 @@ class TravelLifecycleBlackBoxTest {
 
     @AfterEach
     void tearDown() {
-        List<Long> tripIds = new ArrayList<>(createdTripIds);
-        Collections.reverse(tripIds);
-        for (Long tripId : tripIds) {
-            cleanupTrip(tripId);
+        if (!createdTripIds.isEmpty()) {
+            List<Long> tripIds = new ArrayList<>(createdTripIds);
+            Collections.reverse(tripIds);
+            for (Long tripId : tripIds) {
+                cleanupTrip(tripId);
+            }
+            createdTripIds.clear();
         }
-        createdTripIds.clear();
 
-        List<Long> userIds = new ArrayList<>(createdUserIds);
-        Collections.reverse(userIds);
-        for (Long userId : userIds) {
-            userRepository.findById(userId).ifPresent(userRepository::delete);
+        if (!createdUserIds.isEmpty()) {
+            List<Long> userIds = new ArrayList<>(createdUserIds);
+            Collections.reverse(userIds);
+            for (Long userId : userIds) {
+                userRepository.findById(userId).ifPresent(userRepository::delete);
+            }
+            createdUserIds.clear();
         }
-        createdUserIds.clear();
     }
 
     @Test

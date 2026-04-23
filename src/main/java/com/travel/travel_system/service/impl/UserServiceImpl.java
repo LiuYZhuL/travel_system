@@ -13,6 +13,8 @@ import java.util.Optional;
 @Service
 public class UserServiceImpl implements UserService {
 
+    private static final String CURRENT_PRIVACY_AGREEMENT_VERSION = "2026-04-23";
+
     @Autowired
     private UserRepository userRepository;
 
@@ -39,6 +41,9 @@ public class UserServiceImpl implements UserService {
         user.setNickname(USER_NICKNAME);
         user.setAvatarUrl(USER_AVATAR_URL);
         user.setDefaultPrivacyMode(PrivacyMode.PRIVATE);
+        user.setPrivacyAgreementAccepted(Boolean.FALSE);
+        user.setPrivacyAgreementVersion(null);
+        user.setPrivacyAgreementAcceptedAt(null);
         user.setCreatedAt(new Date());
         user.setUpdatedAt(new Date());
 
@@ -104,6 +109,35 @@ public class UserServiceImpl implements UserService {
     @Override
     public Optional<User> getUserInfo(Long userId) {
         return userRepository.findById(userId);
+    }
+
+    @Override
+    public String getCurrentPrivacyAgreementVersion() {
+        return CURRENT_PRIVACY_AGREEMENT_VERSION;
+    }
+
+    @Override
+    public boolean hasAcceptedCurrentPrivacyAgreement(User user) {
+        if (user == null) {
+            return false;
+        }
+        return Boolean.TRUE.equals(user.getPrivacyAgreementAccepted())
+                && CURRENT_PRIVACY_AGREEMENT_VERSION.equalsIgnoreCase(user.getPrivacyAgreementVersion());
+    }
+
+    @Override
+    public User acceptPrivacyAgreement(Long userId, String agreementVersion) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("用户不存在"));
+        user.setPrivacyAgreementAccepted(Boolean.TRUE);
+        user.setPrivacyAgreementVersion(
+                agreementVersion != null && !agreementVersion.trim().isEmpty()
+                        ? agreementVersion.trim()
+                        : CURRENT_PRIVACY_AGREEMENT_VERSION
+        );
+        user.setPrivacyAgreementAcceptedAt(new Date());
+        user.setUpdatedAt(new Date());
+        return userRepository.save(user);
     }
 
 

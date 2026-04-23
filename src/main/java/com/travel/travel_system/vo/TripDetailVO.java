@@ -1,5 +1,7 @@
 package com.travel.travel_system.vo;
 
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 import lombok.*;
 import java.io.Serializable;
 import java.util.List;
@@ -29,6 +31,7 @@ public class TripDetailVO implements Serializable {
     public static class TripSummaryVO implements Serializable {
         private static final long serialVersionUID = 1L;
 
+        @JsonSerialize(using = ToStringSerializer.class)
         private Long id;
         private String title;
         private TripStatusVO status;

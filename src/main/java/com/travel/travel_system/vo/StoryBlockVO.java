@@ -20,6 +20,7 @@ public class StoryBlockVO implements Serializable {
     private String displayTimeText;
     private String locationName;
     private GeoPointVO point;
+    private PrivacyModeVO privacyMode;
     private String title;
     private String text;
     private MediaAssetVO coverMedia;

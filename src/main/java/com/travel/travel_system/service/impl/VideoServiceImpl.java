@@ -54,6 +54,8 @@ public class VideoServiceImpl implements VideoService {
     private OssService ossService;
     @Autowired
     private MediaAnchorProjectionService mediaAnchorProjectionService;
+    @Autowired
+    private TripAggregationRefreshService tripAggregationRefreshService;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -107,6 +109,7 @@ public class VideoServiceImpl implements VideoService {
 
         Video savedVideo = videoRepository.save(video);
         refreshTripMediaCounts(tripId);
+        tripAggregationRefreshService.markTripDirty(tripId, "VIDEO_UPLOAD");
 
         // 统一走投影服务
         mediaAnchorProjectionService.projectVideoAnchor(savedVideo.getId(), tripId);
@@ -140,7 +143,9 @@ public class VideoServiceImpl implements VideoService {
             }
         }
 
-        return videoRepository.save(video);
+        Video saved = videoRepository.save(video);
+        tripAggregationRefreshService.markTripDirty(saved.getTripId(), "VIDEO_UPDATE");
+        return saved;
     }
 
     @Override
@@ -171,6 +176,7 @@ public class VideoServiceImpl implements VideoService {
 
         videoRepository.delete(video);
         refreshTripMediaCounts(video.getTripId());
+        tripAggregationRefreshService.markTripDirty(video.getTripId(), "VIDEO_DELETE");
     }
 
     @Override
@@ -218,6 +224,9 @@ public class VideoServiceImpl implements VideoService {
         }
 
         videoRepository.save(video);
+        if (video.getTripId() != null) {
+            tripAggregationRefreshService.markTripDirty(video.getTripId(), "VIDEO_PROCESS_COMPLETE");
+        }
     }
 
 
@@ -269,6 +278,7 @@ public class VideoServiceImpl implements VideoService {
         Video saved = videoRepository.save(video);
 
         mediaAnchorProjectionService.projectVideoAnchor(saved.getId(), saved.getTripId());
+        tripAggregationRefreshService.markTripDirty(saved.getTripId(), "VIDEO_ASSIST_UPDATE");
         return saved;
     }
 

@@ -31,6 +31,15 @@ public class User {
     @Column(name = "default_privacy_mode")
     @Enumerated(EnumType.STRING)
     private PrivacyMode defaultPrivacyMode;
+
+    @Column(name = "privacy_agreement_accepted")
+    private Boolean privacyAgreementAccepted;
+
+    @Column(name = "privacy_agreement_version")
+    private String privacyAgreementVersion;
+
+    @Column(name = "privacy_agreement_accepted_at")
+    private Date privacyAgreementAcceptedAt;
     
     @Column(name = "created_at")
     @CreationTimestamp
