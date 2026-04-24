@@ -225,7 +225,8 @@ public class TripController extends BaseController {
             Long userId = requireUserId(request);
             tripService.getUserTripOrThrow(userId, tripId);
             String reason = body != null ? (String) body.get("reason") : null;
-            Map<String, Object> summary = aiService.regenerateTripSummary(tripId, reason);
+            String userPrompt = body != null ? (String) body.get("userPrompt") : null;
+            Map<String, Object> summary = aiService.regenerateTripSummary(tripId, reason, userPrompt);
             return success(summary);
         } catch (Exception e) {
             return error("SYSTEM_500", "重新生成AI总结失败：" + e.getMessage());
@@ -253,6 +254,32 @@ public class TripController extends BaseController {
             return success(aiService.rollbackAiSummary(tripId, summaryId));
         } catch (Exception e) {
             return error("SYSTEM_500", "回滚AI总结失败：" + e.getMessage());
+        }
+    }
+
+    @DeleteMapping("/{tripId}/ai-summary")
+    public ApiResponse<?> deleteAiSummary(@PathVariable Long tripId, HttpServletRequest request) {
+        try {
+            Long userId = requireUserId(request);
+            tripService.getUserTripOrThrow(userId, tripId);
+            aiService.deleteAiSummary(tripId);
+            return success(Map.of("tripId", tripId, "deleted", true));
+        } catch (Exception e) {
+            return error("SYSTEM_500", "删除AI总结失败：" + e.getMessage());
+        }
+    }
+
+    @DeleteMapping("/{tripId}/ai-summary/{summaryId}")
+    public ApiResponse<?> deleteAiSummaryVersion(@PathVariable Long tripId,
+                                                 @PathVariable Long summaryId,
+                                                 HttpServletRequest request) {
+        try {
+            Long userId = requireUserId(request);
+            tripService.getUserTripOrThrow(userId, tripId);
+            aiService.deleteAiSummaryVersion(tripId, summaryId);
+            return success(Map.of("tripId", tripId, "summaryId", summaryId, "deleted", true));
+        } catch (Exception e) {
+            return error("SYSTEM_500", "删除AI总结版本失败：" + e.getMessage());
         }
     }
 

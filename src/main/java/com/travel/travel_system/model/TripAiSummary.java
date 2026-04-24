@@ -51,6 +51,9 @@ public class TripAiSummary {
     @Column(name = "regenerate_reason", length = 500)
     private String regenerateReason;
 
+    @Column(name = "user_prompt", columnDefinition = "TEXT")
+    private String userPrompt;
+
     @Column(name = "generated_at")
     private Date generatedAt;
 

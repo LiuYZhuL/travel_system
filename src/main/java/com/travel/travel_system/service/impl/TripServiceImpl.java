@@ -362,10 +362,6 @@ public class TripServiceImpl implements TripService {
         }
 
         try {
-            aiService.generateTripSummary(tripId);
-        } catch (Exception ignored) {
-        }
-        try {
             aiService.rebuildStoryBlocks(tripId);
         } catch (Exception ignored) {
         }

@@ -15,6 +15,14 @@ public interface AiService {
     Map<String, Object> generateTripSummary(Long tripId);
 
     /**
+     * 生成行程总结（支持用户自定义风格提示词）
+     * @param tripId     行程ID
+     * @param userPrompt 用户自定义写作风格指令；为 null 时使用默认提示词
+     * @return 行程总结信息
+     */
+    Map<String, Object> generateTripSummary(Long tripId, String userPrompt);
+
+    /**
      * 重建故事流
      * @param tripId 行程ID
      * @return 重建的故事块列表
@@ -46,7 +54,27 @@ public interface AiService {
 
     Map<String, Object> regenerateTripSummary(Long tripId, String reason);
 
+    /**
+     * 重新生成行程总结（支持用户自定义风格提示词）
+     * @param tripId     行程ID
+     * @param reason     重新生成原因
+     * @param userPrompt 用户自定义写作风格指令；为 null 时使用默认提示词
+     */
+    Map<String, Object> regenerateTripSummary(Long tripId, String reason, String userPrompt);
+
     List<Map<String, Object>> getAiSummaryHistory(Long tripId);
 
     Map<String, Object> rollbackAiSummary(Long tripId, Long summaryId);
+
+    /**
+     * 删除行程的所有 AI 总结记录，并清空行程的 summaryText 快照
+     */
+    void deleteAiSummary(Long tripId);
+
+    /**
+     * 删除指定版本的 AI 总结，若删除的是最新版则自动晋升次新版
+     * @param tripId    行程 ID
+     * @param summaryId 要删除的 AI 总结 ID
+     */
+    void deleteAiSummaryVersion(Long tripId, Long summaryId);
 }

@@ -75,12 +75,19 @@ public class AiApiClient {
     }
 
     /**
-     * 生成行程总结
-     * @param tripData 行程数据
-     * @return 行程总结
+     * 生成行程总结（使用默认风格提示词）
      */
     public String generateTripSummary(Map<String, Object> tripData) {
-        String prompt = buildTripSummaryPrompt(tripData);
+        return generateTripSummary(tripData, null);
+    }
+
+    /**
+     * 生成行程总结，支持用户自定义风格提示词。
+     * @param tripData   行程数据
+     * @param userPrompt 用户自定义风格指令；为 null 或空时使用默认提示词
+     */
+    public String generateTripSummary(Map<String, Object> tripData, String userPrompt) {
+        String prompt = buildTripSummaryPrompt(tripData, userPrompt);
         return generateContent(prompt, 0.7);
     }
 
@@ -105,22 +112,31 @@ public class AiApiClient {
         return generateContent(prompt, 0.6);
     }
 
+    private static final String DEFAULT_TRIP_SUMMARY_STYLE =
+            "请用生动感性的语气，重点突出旅途中的特色体验与情感感受，文风简洁有温度，不超过150字。";
+
     /**
-     * 构建行程总结提示词
+     * 构建行程总结提示词，支持用户自定义风格指令。
+     * userPrompt 为空时使用默认风格。
      */
-    private String buildTripSummaryPrompt(Map<String, Object> tripData) {
+    private String buildTripSummaryPrompt(Map<String, Object> tripData, String userPrompt) {
+        String styleInstruction = (userPrompt != null && !userPrompt.isBlank())
+                ? userPrompt.trim()
+                : DEFAULT_TRIP_SUMMARY_STYLE;
+
         StringBuilder prompt = new StringBuilder();
-        prompt.append("请为以下行程生成一个详细的总结：\n");
+        prompt.append("请根据以下行程数据生成一段旅行总结：\n\n");
         prompt.append("行程标题：").append(tripData.getOrDefault("title", "未知行程")).append("\n");
-        prompt.append("行程时间：").append(tripData.getOrDefault("startTime", "未知时间")).append("\n");
-        prompt.append("行程地点：").append(tripData.getOrDefault("places", "未知地点")).append("\n");
+        prompt.append("出发时间：").append(tripData.getOrDefault("startTime", "未知时间")).append("\n");
+        prompt.append("途经地点：").append(tripData.getOrDefault("places", "未知地点")).append("\n");
         prompt.append("行程距离：").append(tripData.getOrDefault("distanceText", "未知距离")).append("\n");
         prompt.append("行程时长：").append(tripData.getOrDefault("durationText", "未知时长")).append("\n");
-        prompt.append("\n请生成一个包含以下内容的总结：\n");
-        prompt.append("1. 行程概述\n");
-        prompt.append("2. 主要亮点\n");
-        prompt.append("3. 总体感受\n");
-        prompt.append("\n总结应该生动有趣，突出行程的特色和精彩瞬间。");
+        if (tripData.containsKey("longestStayPlace")) {
+            prompt.append("停留最久的地点：").append(tripData.get("longestStayPlace"))
+                  .append("（").append(tripData.getOrDefault("longestStayDuration", "")).append("）\n");
+        }
+        prompt.append("\n【写作要求】\n").append(styleInstruction).append("\n");
+        prompt.append("\n只输出总结正文，不要加标题、编号或额外说明。");
         return prompt.toString();
     }
 

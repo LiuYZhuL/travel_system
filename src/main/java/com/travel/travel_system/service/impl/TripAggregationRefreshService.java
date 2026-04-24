@@ -12,7 +12,6 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
@@ -23,7 +22,6 @@ public class TripAggregationRefreshService {
     public static final String DIRTY_KEY_PATTERN = "trip_aggregation:dirty:*";
     private static final String DIRTY_KEY_PREFIX = "trip_aggregation:dirty:";
     private static final String LOCK_KEY_PREFIX = "trip_aggregation:lock:";
-    private static final String AI_REFRESH_AT_KEY_PREFIX = "trip_aggregation:ai:last:";
 
     @Autowired
     private RedisService redisService;
@@ -45,9 +43,6 @@ public class TripAggregationRefreshService {
 
     @Value("${app.trip.aggregation.dirty-ttl-seconds:86400}")
     private long aggregationDirtyTtlSeconds;
-
-    @Value("${app.trip.aggregation.ai-min-interval-ms:45000}")
-    private long aiRefreshMinIntervalMs;
 
     public void markTripDirty(Long tripId, String reason) {
         if (tripId == null) {
@@ -99,10 +94,6 @@ public class TripAggregationRefreshService {
 
             placeSummaryService.generatePlaceSummariesForTrip(tripId);
             aiService.rebuildStoryBlocks(tripId);
-            if (shouldRefreshAiSummary(latest, System.currentTimeMillis())) {
-                aiService.generateTripSummary(tripId);
-                redisService.setString(aiRefreshAtKey(tripId), String.valueOf(System.currentTimeMillis()), aggregationDirtyTtlSeconds);
-            }
 
             AggregationDirtyState after = redisService.getJson(dirtyKey(tripId), AggregationDirtyState.class);
             if (after == null) {
@@ -149,17 +140,6 @@ public class TripAggregationRefreshService {
         return quietEnough || batchEnough;
     }
 
-    private boolean shouldRefreshAiSummary(AggregationDirtyState state, long now) {
-        if (state == null) {
-            return false;
-        }
-        long lastAiRefreshAt = parseLong(redisService.getString(aiRefreshAtKey(state.tripId)));
-        boolean intervalReached = lastAiRefreshAt <= 0L || now - lastAiRefreshAt >= Math.max(aiRefreshMinIntervalMs, 0L);
-        boolean hasContentMutation = state.reasons != null && state.reasons.stream().filter(Objects::nonNull)
-                .anyMatch(reason -> !reason.startsWith("TRACK_"));
-        return hasContentMutation || intervalReached;
-    }
-
     private void appendReason(AggregationDirtyState state, String reason) {
         if (state == null) {
             return;
@@ -203,10 +183,6 @@ public class TripAggregationRefreshService {
 
     private String lockKey(Long tripId) {
         return LOCK_KEY_PREFIX + tripId;
-    }
-
-    private String aiRefreshAtKey(Long tripId) {
-        return AI_REFRESH_AT_KEY_PREFIX + tripId;
     }
 
     public static class AggregationDirtyState {

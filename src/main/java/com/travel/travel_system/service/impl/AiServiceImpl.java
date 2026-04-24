@@ -64,6 +64,12 @@ public class AiServiceImpl implements AiService {
     @Override
     @Transactional
     public Map<String, Object> generateTripSummary(Long tripId) {
+        return generateTripSummary(tripId, null);
+    }
+
+    @Override
+    @Transactional
+    public Map<String, Object> generateTripSummary(Long tripId, String userPrompt) {
         Trip trip = tripRepository.findById(tripId)
                 .orElseThrow(() -> new RuntimeException("Trip not found, tripId: " + tripId));
 
@@ -94,7 +100,8 @@ public class AiServiceImpl implements AiService {
             tripData.put("longestStayDuration", DateTimeUtils.formatDuration(longestStay.getDurationSec()));
         }
 
-        String aiSummary = aiApiClient.generateTripSummary(tripData);
+        String effectivePrompt = (userPrompt != null && !userPrompt.isBlank()) ? userPrompt.trim() : null;
+        String aiSummary = aiApiClient.generateTripSummary(tripData, effectivePrompt);
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("tripId", tripId);
         summary.put("overview", normalizeOverview(aiSummary, trip, places));
@@ -103,8 +110,9 @@ public class AiServiceImpl implements AiService {
         summary.put("bestMoment", buildBestMoment(places, photoCount));
         summary.put("generatedAt", new Date());
         summary.put("version", "v1.0");
+        summary.put("userPrompt", effectivePrompt);
 
-        saveTripAiSummary(tripId, trip.getUserId(), summary);
+        saveTripAiSummary(tripId, trip.getUserId(), summary, null, effectivePrompt);
         return summary;
     }
 
@@ -298,7 +306,13 @@ public class AiServiceImpl implements AiService {
     @Override
     @Transactional
     public Map<String, Object> regenerateTripSummary(Long tripId, String reason) {
-        Map<String, Object> summary = generateTripSummary(tripId);
+        return regenerateTripSummary(tripId, reason, null);
+    }
+
+    @Override
+    @Transactional
+    public Map<String, Object> regenerateTripSummary(Long tripId, String reason, String userPrompt) {
+        Map<String, Object> summary = generateTripSummary(tripId, userPrompt);
         String finalReason = reason != null ? reason : "manual_regenerate";
         tripAiSummaryRepository.findFirstByTripIdAndIsLatestTrueOrderByGeneratedAtDescIdDesc(tripId).ifPresent(latest -> {
             latest.setRegenerateReason(finalReason);
@@ -320,6 +334,7 @@ public class AiServiceImpl implements AiService {
             item.put("regenerateReason", summary.getRegenerateReason());
             item.put("generatedAt", DateTimeUtils.formatDateTime(summary.getGeneratedAt()));
             item.put("version", summary.getVersion());
+            item.put("userPrompt", summary.getUserPrompt());
             return item;
         }).collect(Collectors.toList());
     }
@@ -357,16 +372,69 @@ public class AiServiceImpl implements AiService {
         result.put("bestMoment", target.getBestMoment());
         result.put("isLatest", true);
         result.put("generatedAt", DateTimeUtils.formatDateTime(target.getGeneratedAt()));
+        result.put("userPrompt", target.getUserPrompt());
         return result;
+    }
+
+    @Override
+    @Transactional
+    public void deleteAiSummary(Long tripId) {
+        tripAiSummaryRepository.deleteByTripId(tripId);
+        tripRepository.findById(tripId).ifPresent(trip -> {
+            trip.setSummaryText(null);
+            trip.setGeneratedAt(null);
+            tripRepository.save(trip);
+        });
+    }
+
+    @Override
+    @Transactional
+    public void deleteAiSummaryVersion(Long tripId, Long summaryId) {
+        TripAiSummary target = tripAiSummaryRepository.findById(summaryId)
+                .orElseThrow(() -> new RuntimeException("AI 总结版本不存在: " + summaryId));
+        if (!target.getTripId().equals(tripId)) {
+            throw new RuntimeException("summaryId 不属于该行程");
+        }
+
+        boolean wasLatest = Boolean.TRUE.equals(target.getIsLatest());
+        tripAiSummaryRepository.delete(target);
+
+        if (wasLatest) {
+            // 晋升次新版为最新版
+            tripAiSummaryRepository.findByTripIdOrderByGeneratedAtDesc(tripId).stream()
+                    .findFirst()
+                    .ifPresentOrElse(
+                            next -> {
+                                next.setIsLatest(true);
+                                tripAiSummaryRepository.save(next);
+                                tripRepository.findById(tripId).ifPresent(trip -> {
+                                    trip.setSummaryText(buildTripSummarySnapshot(next.getOverview()));
+                                    trip.setGeneratedAt(next.getGeneratedAt());
+                                    tripRepository.save(trip);
+                                });
+                            },
+                            () -> tripRepository.findById(tripId).ifPresent(trip -> {
+                                trip.setSummaryText(null);
+                                trip.setGeneratedAt(null);
+                                tripRepository.save(trip);
+                            })
+                    );
+        }
     }
 
     @Transactional
     public void saveTripAiSummary(Long tripId, Long userId, Map<String, Object> summary) {
-        saveTripAiSummary(tripId, userId, summary, null);
+        saveTripAiSummary(tripId, userId, summary, null, null);
     }
 
     @Transactional
     public void saveTripAiSummary(Long tripId, Long userId, Map<String, Object> summary, String regenerateReason) {
+        saveTripAiSummary(tripId, userId, summary, regenerateReason, null);
+    }
+
+    @Transactional
+    public void saveTripAiSummary(Long tripId, Long userId, Map<String, Object> summary,
+                                  String regenerateReason, String userPrompt) {
         List<TripAiSummary> existing = tripAiSummaryRepository.findByTripIdOrderByGeneratedAtDesc(tripId);
         for (TripAiSummary item : existing) {
             item.setIsLatest(false);
@@ -388,6 +456,7 @@ public class AiServiceImpl implements AiService {
         aiSummary.setGeneratedAt(summary.get("generatedAt") instanceof Date date ? date : new Date());
         aiSummary.setIsLatest(true);
         aiSummary.setRegenerateReason(regenerateReason);
+        aiSummary.setUserPrompt(userPrompt);
         tripAiSummaryRepository.save(aiSummary);
 
         tripRepository.findById(tripId).ifPresent(trip -> {
