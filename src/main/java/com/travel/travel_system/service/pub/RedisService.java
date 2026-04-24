@@ -59,6 +59,65 @@ public class RedisService {
         }
     }
 
+    // ---- OAuth State / Nonce 管理（防止授权码重放） ----
+
+    /**
+     * 存储一次性 state nonce，TTL 与微信 code 有效期对齐（5 分钟）
+     */
+    public void storeStateNonce(String state, long ttlSeconds) {
+        try {
+            redisTemplate.opsForValue().set("oauth_state:" + state, "1", ttlSeconds, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            logger.error("storeStateNonce 失败, state={}: {}", state, e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 消耗 state nonce（原子性 get + delete，单次有效）
+     * 返回 true 表示 state 合法且尚未使用
+     */
+    public boolean consumeStateNonce(String state) {
+        try {
+            String key = "oauth_state:" + state;
+            Boolean existed = redisTemplate.hasKey(key);
+            if (!Boolean.TRUE.equals(existed)) return false;
+            redisTemplate.delete(key);
+            return true;
+        } catch (Exception e) {
+            logger.error("consumeStateNonce 失败, state={}: {}", state, e.getMessage(), e);
+            return false;
+        }
+    }
+
+    // ---- Refresh Token 管理 ----
+
+    public void storeRefreshToken(String openId, String refreshToken, long expiration) {
+        try {
+            redisTemplate.opsForValue().set("refresh_token:" + openId, refreshToken, expiration, TimeUnit.SECONDS);
+            logger.debug("刷新令牌存储成功，openId={}", openId);
+        } catch (Exception e) {
+            logger.error("刷新令牌存储失败, openId={}: {}", openId, e.getMessage(), e);
+        }
+    }
+
+    public String getStoredRefreshToken(String openId) {
+        try {
+            return redisTemplate.opsForValue().get("refresh_token:" + openId);
+        } catch (Exception e) {
+            logger.error("获取刷新令牌失败, openId={}: {}", openId, e.getMessage(), e);
+            return null;
+        }
+    }
+
+    public void deleteRefreshToken(String openId) {
+        try {
+            redisTemplate.delete("refresh_token:" + openId);
+            logger.debug("刷新令牌已删除，openId={}", openId);
+        } catch (Exception e) {
+            logger.error("删除刷新令牌失败, openId={}: {}", openId, e.getMessage(), e);
+        }
+    }
+
     public void setString(String key, String value, long expirationSeconds) {
         try {
             redisTemplate.opsForValue().set(key, value, expirationSeconds, TimeUnit.SECONDS);

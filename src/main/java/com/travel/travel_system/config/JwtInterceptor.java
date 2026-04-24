@@ -39,6 +39,15 @@ public class JwtInterceptor implements HandlerInterceptor {
         // 提取令牌
         String token = authorization.substring((jwtUtils.getTokenPrefix() + " ").length());
         
+        // 拒绝将 refresh token 用作 access token
+        String tokenType = jwtUtils.getTokenType(token);
+        if ("refresh".equals(tokenType)) {
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            response.setContentType("application/json");
+            response.getWriter().write("{\"code\": \"AUTH_001\", \"message\": \"不能使用刷新令牌访问资源\", \"data\": null, \"requestId\": \"" + UUID.randomUUID() + "\"}");
+            return false;
+        }
+
         // 检查令牌是否在黑名单中
         if (redisService.isTokenInBlacklist(token)) {
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
