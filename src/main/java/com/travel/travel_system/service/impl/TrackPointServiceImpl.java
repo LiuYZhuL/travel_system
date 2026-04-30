@@ -96,6 +96,12 @@ public class TrackPointServiceImpl implements TrackPointService {
     private static final String CHINA_PBF = "static/pbf/china-260317.osm.pbf";
     private static final String HENAN_PBF = "static/pbf/henan-260321.osm.pbf";
 
+    /** 中国大陆 + 港澳台 + 南海诸岛的粗略外接矩形（WGS-84） */
+    private static final double CHINA_LAT_MIN = 3.5;
+    private static final double CHINA_LAT_MAX = 53.6;
+    private static final double CHINA_LNG_MIN = 73.4;
+    private static final double CHINA_LNG_MAX = 135.1;
+
     private static final String MATCH_LATEST_KEY_PREFIX = "track_match:latest:";
     private static final String MATCH_DIRTY_KEY_PREFIX = "track_match:dirty:";
     private static final String MATCH_FINGERPRINT_KEY_PREFIX = "track_match:fingerprint:";
@@ -406,6 +412,12 @@ public class TrackPointServiceImpl implements TrackPointService {
 
             List<GeoCoord> trajectoryWgs84 = toGeoCoords(prepared);
             String resourcePath = resolveRoadResource(trajectoryWgs84);
+
+            // 无对应路网数据（境外轨迹）—— 直接将原始 GPS 点作为结果返回，跳过耗时的 OSM 加载
+            if (resourcePath == null) {
+                log.info("[MAP_MATCH_SKIP] no road resource for trajectory, returning raw GPS points count={}", prepared.size());
+                return buildRawGpsFallbackResults(prepared);
+            }
 
             log.warn("[MAP_MATCH_START] pointCount={} resourcePath={} firstPoint=({}, {}) lastPoint=({}, {})",
                     prepared.size(), resourcePath,
@@ -2522,12 +2534,30 @@ public class TrackPointServiceImpl implements TrackPointService {
         return best;
     }
 
+    /**
+     * 根据轨迹重心决定使用哪份路网 PBF 文件。
+     * 若轨迹明显在中国范围之外（无对应路网数据），返回 null，调用方应跳过路网匹配。
+     */
     private String resolveRoadResource(List<GeoCoord> trajectoryWgs84) {
         if (trajectoryWgs84 == null || trajectoryWgs84.isEmpty()) {
             return CHINA_PBF;
         }
-        GeoCoord first = trajectoryWgs84.get(0);
-        if (first.getLat() >= 31.4 && first.getLat() <= 36.4 && first.getLon() >= 110.4 && first.getLon() <= 116.6) {
+        // 用轨迹重心判断，避免因少数越界点误判
+        double avgLat = 0, avgLon = 0;
+        for (GeoCoord c : trajectoryWgs84) {
+            avgLat += c.getLat();
+            avgLon += c.getLon();
+        }
+        avgLat /= trajectoryWgs84.size();
+        avgLon /= trajectoryWgs84.size();
+
+        if (avgLat < CHINA_LAT_MIN || avgLat > CHINA_LAT_MAX
+                || avgLon < CHINA_LNG_MIN || avgLon > CHINA_LNG_MAX) {
+            log.info("[ROAD_RESOURCE] centroid=({}, {}) is outside China bbox, skipping map matching",
+                    round6(avgLat), round6(avgLon));
+            return null;
+        }
+        if (avgLat >= 31.4 && avgLat <= 36.4 && avgLon >= 110.4 && avgLon <= 116.6) {
             return HENAN_PBF;
         }
         return CHINA_PBF;
@@ -2539,6 +2569,31 @@ public class TrackPointServiceImpl implements TrackPointService {
             result.add(new GeoCoord(decodeDouble(point.getLatEnc()), decodeDouble(point.getLngEnc())));
         }
         return result;
+    }
+
+    /**
+     * 境外轨迹无路网数据时，将原始 GPS 点包装成 MapMatchingResult 返回（matchMode=RAW_GPS）。
+     * 这样前端仍能渲染轨迹，只是没有路网吸附效果。
+     */
+    private List<MapMatchingResult> buildRawGpsFallbackResults(List<TrackPoint> trackPoints) {
+        List<MapMatchingResult> results = new ArrayList<>();
+        for (int i = 0; i < trackPoints.size(); i++) {
+            TrackPoint tp = trackPoints.get(i);
+            double lat = decodeDouble(tp.getLatEnc());
+            double lon = decodeDouble(tp.getLngEnc());
+            MapMatchingResult r = new MapMatchingResult();
+            r.setTrackPointId(tp.getId());
+            r.setMatchedLatitude(lat);
+            r.setMatchedLongitude(lon);
+            r.setRawLatitude(lat);
+            r.setRawLongitude(lon);
+            r.setConfidence(1.0);
+            r.setPosition(i);
+            r.setMatchMode("RAW_GPS");
+            r.setMatchReason("no_road_data_for_region");
+            results.add(r);
+        }
+        return results;
     }
 
     private List<TrackPoint> normalizeTrackPointsToWgs84(List<TrackPoint> points) {

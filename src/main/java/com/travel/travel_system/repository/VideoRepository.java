@@ -1,12 +1,15 @@
 package com.travel.travel_system.repository;
 
 import com.travel.travel_system.model.Video;
+import com.travel.travel_system.model.enums.VideoProcessingStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Date;
 import java.util.List;
@@ -82,4 +85,22 @@ public interface VideoRepository extends JpaRepository<Video, Long> {
      * 查询最近的视频
      */
     Video findFirstByTripIdOrderByCreatedAtDesc(Long tripId);
+
+    /**
+     * 仅更新处理状态，不触碰其他字段（避免异步任务覆盖 noteId 等并发写入字段）
+     */
+    @Modifying
+    @Transactional
+    @Query("UPDATE Video v SET v.processingStatus = :status WHERE v.id = :videoId")
+    void updateProcessingStatus(@Param("videoId") Long videoId, @Param("status") VideoProcessingStatus status);
+
+    /**
+     * 仅更新处理结果（状态 + 缩略图），不触碰 noteId 等字段
+     */
+    @Modifying
+    @Transactional
+    @Query("UPDATE Video v SET v.processingStatus = :status, v.thumbnailObjectKey = :thumbnailKey WHERE v.id = :videoId")
+    void updateProcessingResult(@Param("videoId") Long videoId,
+                                @Param("status") VideoProcessingStatus status,
+                                @Param("thumbnailKey") String thumbnailKey);
 }

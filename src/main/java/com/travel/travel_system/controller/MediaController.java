@@ -54,6 +54,7 @@ public class MediaController extends BaseController {
                                       @RequestParam(required = false) String locationName,
                                       @RequestParam(required = false) String locationMode,
                                       @RequestParam(required = false) String coordType,
+                                      @RequestParam(required = false) String mediaTypeHint,
                                       @RequestParam MultipartFile file,
                                       HttpServletRequest httpRequest) {
         try {
@@ -63,7 +64,14 @@ public class MediaController extends BaseController {
                 return error("VALID_002", "文件不能为空");
             }
 
+            // 优先从文件自身检测类型；检测失败时使用前端传入的 mediaTypeHint 作为兜底
+            // （微信小程序 uni.uploadFile 上传视频时 Content-Type 可能为 application/octet-stream，文件名也无扩展名）
             String mediaType = detectMediaType(file);
+            if (mediaType == null && mediaTypeHint != null) {
+                String hint = mediaTypeHint.toLowerCase(Locale.ROOT).trim();
+                if (hint.equals("video")) mediaType = "VIDEO";
+                else if (hint.equals("image") || hint.equals("photo")) mediaType = "PHOTO";
+            }
             if ("PHOTO".equals(mediaType)) {
                 byte[] bytes = file.getBytes();
                 String base64 = Base64.getEncoder().encodeToString(bytes);

@@ -15,6 +15,10 @@ public class TrackPolylineVO implements Serializable {
     private List<GeoPointVO> points;
     private Long distanceM;
     private Boolean simplified;
+    /** 该折线对应的行程分段序号（从 1 开始），用于前端按顺序着色 */
+    private Integer segmentNo;
+    /** 建议前端使用的颜色（由后端按 segmentNo 分配） */
+    private String color;
     private List<SegmentVO> segments;
 
     @Data

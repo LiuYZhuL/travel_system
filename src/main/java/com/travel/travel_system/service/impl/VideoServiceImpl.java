@@ -190,10 +190,12 @@ public class VideoServiceImpl implements VideoService {
         Video video = videoRepository.findById(videoId)
                 .orElseThrow(() -> new RuntimeException("视频不存在，videoId: " + videoId));
 
-        video.setProcessingStatus(VideoProcessingStatus.PROCESSING);
-        videoRepository.save(video);
+        // 仅更新处理状态字段，避免整体 save 覆盖并发写入的 noteId 等字段
+        videoRepository.updateProcessingStatus(videoId, VideoProcessingStatus.PROCESSING);
 
         Path tempVideoFile = null;
+        VideoProcessingStatus finalStatus = VideoProcessingStatus.FAILED;
+        String thumbnailKey = null;
         try {
             String suffix = ".mp4";
             if (video.getObjectKey() != null) {
@@ -208,12 +210,13 @@ public class VideoServiceImpl implements VideoService {
             Files.write(tempVideoFile, videoBytes);
 
             generateAndUploadThumbnail(video, tempVideoFile.toFile());
+            thumbnailKey = video.getThumbnailObjectKey();
 
-            video.setProcessingStatus(VideoProcessingStatus.COMPLETED);
+            finalStatus = VideoProcessingStatus.COMPLETED;
 
             mediaAnchorProjectionService.projectVideoAnchor(videoId, video.getTripId());
         } catch (Exception e) {
-            video.setProcessingStatus(VideoProcessingStatus.FAILED);
+            finalStatus = VideoProcessingStatus.FAILED;
         } finally {
             if (tempVideoFile != null) {
                 try {
@@ -223,7 +226,8 @@ public class VideoServiceImpl implements VideoService {
             }
         }
 
-        videoRepository.save(video);
+        // 仅写回处理结果字段（状态+缩略图），不覆盖其他并发修改的字段（如 noteId）
+        videoRepository.updateProcessingResult(videoId, finalStatus, thumbnailKey);
         if (video.getTripId() != null) {
             tripAggregationRefreshService.markTripDirty(video.getTripId(), "VIDEO_PROCESS_COMPLETE");
         }

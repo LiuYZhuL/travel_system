@@ -74,6 +74,10 @@ public class TripServiceImpl implements TripService {
     @Autowired
     private TripSegmentRepository tripSegmentRepository;
     @Autowired
+    private TripRouteSnapshotRepository tripRouteSnapshotRepository;
+    @Autowired
+    private PlaceSummaryMemberRepository placeSummaryMemberRepository;
+    @Autowired
     private PlaceSummaryService placeSummaryService;
     @Autowired
     private TripAggregationRefreshService tripAggregationRefreshService;
@@ -219,16 +223,26 @@ public class TripServiceImpl implements TripService {
         Trip trip = tripRepository.findById(tripId)
                 .orElseThrow(() -> new RuntimeException("行程不存在，tripId: " + tripId));
 
+        // 删除顺序必须遵守外键约束：
+        // 1. anchor 引用 photo / video / trip_segment → 先于这三者删
+        // 2. track_point 引用 trip_segment → 先于 trip_segment 删
+        // 3. place_summary_member 引用 place_summary（逻辑依赖）→ 先于 place_summary 删
+        // 4. trip_route_snapshot 引用 trip → 先于 trip 删
+        // 5. trip_segment 引用 trip，且被 anchor / track_point 引用 → 在它们之后、trip 之前删
         trackPointRepository.deleteByTripId(tripId);
+        anchorRepository.deleteByTripId(tripId);
         photoRepository.deleteByTripId(tripId);
         videoRepository.deleteByTripId(tripId);
-        anchorRepository.deleteByTripId(tripId);
+        placeSummaryMemberRepository.deleteByTripId(tripId);
         placeSummaryRepository.deleteByTripId(tripId);
         tripNoteRepository.deleteByTripId(tripId);
         storyBlockRepository.deleteByTripId(tripId);
         tripAiSummaryRepository.deleteByTripId(tripId);
         tripBBoxRepository.deleteByTripId(tripId);
-
+        // trip_route_snapshot 以 trip_id 为主键
+        if (tripRouteSnapshotRepository.existsById(tripId)) {
+            tripRouteSnapshotRepository.deleteById(tripId);
+        }
         tripSegmentRepository.deleteByTripId(tripId);
 
         tripRepository.delete(trip);
@@ -329,24 +343,26 @@ public class TripServiceImpl implements TripService {
         List<TrackPoint> effectiveTrackPoints = getEffectiveTrackPoints(tripId);
 
         if (!effectiveTrackPoints.isEmpty()) {
-            trip.setDistanceM(calculateTotalDistance(effectiveTrackPoints));
+            // 按 segment 分组计算，避免将暂停间隔（两个 segment 之间的空白）
+            // 错误地计入距离和时长
+            Map<Long, List<TrackPoint>> bySegment = effectiveTrackPoints.stream()
+                    .filter(p -> p.getSegmentId() != null)
+                    .collect(Collectors.groupingBy(TrackPoint::getSegmentId));
 
-            if (effectiveTrackPoints.size() >= 2) {
-                long duration = (effectiveTrackPoints.get(effectiveTrackPoints.size() - 1).getTs()
-                        - effectiveTrackPoints.get(0).getTs()) / 1000L;
-                trip.setDurationSec(Math.max(duration, 0L));
-            } else {
-                trip.setDurationSec(0L);
+            long totalDistanceM = 0L;
+            long totalDurationSec = 0L;
+            for (List<TrackPoint> segPoints : bySegment.values()) {
+                segPoints.sort(Comparator.comparingLong(TrackPoint::getTs));
+                totalDistanceM += calculateTotalDistance(segPoints);
+                if (segPoints.size() >= 2) {
+                    totalDurationSec += (segPoints.get(segPoints.size() - 1).getTs()
+                            - segPoints.get(0).getTs()) / 1000L;
+                }
             }
+            trip.setDistanceM(totalDistanceM);
+            trip.setDurationSec(Math.max(totalDurationSec, 0L));
 
             calculateAndSaveBBox(tripId, effectiveTrackPoints);
-
-            // 路径匹配也应该只基于有效轨迹点
-            performMapMatching(tripId);
-
-            // 路线快照生成依赖 TrackPointServiceImpl；
-            // 你那边也要保证 matchTrajectory/processTrackRendering 只使用 renderEligible=true 的点
-            tripRouteSnapshotService.finalizeFinishedTrip(tripId);
         } else {
             trip.setDistanceM(0L);
             trip.setDurationSec(0L);
@@ -369,6 +385,8 @@ public class TripServiceImpl implements TripService {
         trip.setStatus(TripStatus.FINISHED);
         trip.setGeneratedAt(new Date());
         trip.setUpdatedAt(new Date());
+        // performMapMatching 和 finalizeFinishedTrip 是耗时操作（OSM 加载可达数分钟）
+        // 不在此事务内执行，由 runFinalizeTrip 在事务提交后调用，避免 PROCESSING 卡死
         return tripRepository.save(trip);
     }
 
@@ -499,7 +517,7 @@ public class TripServiceImpl implements TripService {
 
         List<MapMarkerVO> mediaMarkers = buildMediaMarkersForMap(tripId, displayCoordType);
         List<TrackPolylineVO> rawSegments = buildRawSegmentsForMap(segments, trackPoints, displayCoordType);
-        RouteMapPayload routePayload = resolveRouteMapPayload(trip, displayCoordType);
+        RouteMapPayload routePayload = resolveRouteMapPayload(trip, displayCoordType, segments, trackPoints);
 
         return TripMapVO.builder()
                 .center(center)
@@ -771,8 +789,9 @@ public class TripServiceImpl implements TripService {
         long tripCount = tripRepository.countByUserId(userId);
         Long totalDistanceM = tripRepository.sumDistanceByUserId(userId);
         Long totalDurationSec = tripRepository.sumDurationByUserId(userId);
-        Integer totalPhotoCount = tripRepository.sumPhotoCountByUserId(userId);
-        Integer totalVideoCount = tripRepository.sumVideoCountByUserId(userId);
+        // 直接从 photo/video 表实时统计，避免 Trip 冗余字段不同步导致数值偏差
+        long totalPhotoCount = photoRepository.countByUserId(userId);
+        long totalVideoCount = videoRepository.countByUserId(userId);
 
         Map<String, Object> stats = new LinkedHashMap<>();
         stats.put("tripCount", tripCount);
@@ -780,9 +799,18 @@ public class TripServiceImpl implements TripService {
         stats.put("totalDistanceText", formatDistance(totalDistanceM));
         stats.put("totalDurationSec", totalDurationSec != null ? totalDurationSec : 0L);
         stats.put("totalDurationText", DateTimeUtils.formatDuration(totalDurationSec));
-        stats.put("totalPhotoCount", totalPhotoCount != null ? totalPhotoCount : 0);
-        stats.put("totalVideoCount", totalVideoCount != null ? totalVideoCount : 0);
+        stats.put("totalPhotoCount", totalPhotoCount);
+        stats.put("totalVideoCount", totalVideoCount);
         return stats;
+    }
+
+    /** 按分段序号分配的颜色，红→橙→金→绿→蓝→紫循环 */
+    private static final String[] SEGMENT_COLORS = {
+            "#E84040", "#FF7A00", "#F5C518", "#22C55E", "#3B82F6", "#8B5CF6"
+    };
+
+    private static String segmentColor(int segmentNo) {
+        return SEGMENT_COLORS[(segmentNo - 1) % SEGMENT_COLORS.length];
     }
 
     private List<TrackPolylineVO> buildRawSegmentsForMap(List<TripSegment> segments, List<TrackPoint> allTrackPoints, CoordTypeVO displayCoordType) {
@@ -796,7 +824,7 @@ public class TripServiceImpl implements TripService {
                     .filter(point -> Boolean.TRUE.equals(point.getRenderEligible()))
                     .collect(Collectors.toList());
             if (!eligiblePoints.isEmpty()) {
-                rawSegments.add(buildRawPolylineForMap(eligiblePoints, displayCoordType));
+                rawSegments.add(buildRawPolylineForMap(eligiblePoints, displayCoordType, 1));
             }
             return rawSegments;
         }
@@ -810,13 +838,14 @@ public class TripServiceImpl implements TripService {
                 }
             }
             if (!segmentPoints.isEmpty()) {
-                rawSegments.add(buildRawPolylineForMap(segmentPoints, displayCoordType));
+                rawSegments.add(buildRawPolylineForMap(segmentPoints, displayCoordType,
+                        segment.getSegmentNo() != null ? segment.getSegmentNo() : rawSegments.size() + 1));
             }
         }
         return rawSegments;
     }
 
-    private TrackPolylineVO buildRawPolylineForMap(List<TrackPoint> rawTrackPoints, CoordTypeVO displayCoordType) {
+    private TrackPolylineVO buildRawPolylineForMap(List<TrackPoint> rawTrackPoints, CoordTypeVO displayCoordType, int segmentNo) {
         List<GeoPointVO> points = new ArrayList<>();
         if (rawTrackPoints != null) {
             for (TrackPoint point : rawTrackPoints) {
@@ -833,7 +862,13 @@ public class TripServiceImpl implements TripService {
                 }
             }
         }
-        return TrackPolylineVO.builder().points(points).distanceM(0L).simplified(Boolean.FALSE).build();
+        return TrackPolylineVO.builder()
+                .points(points)
+                .distanceM(0L)
+                .simplified(Boolean.FALSE)
+                .segmentNo(segmentNo)
+                .color(segmentColor(segmentNo))
+                .build();
     }
 
     private TrackPolylineVO buildMatchedPolylineForMap(List<MapMatchingResult> results, CoordTypeVO displayCoordType) {
@@ -889,7 +924,8 @@ public class TripServiceImpl implements TripService {
                 && result.getMatchedLongitude() != null;
     }
 
-    private RouteMapPayload resolveRouteMapPayload(Trip trip, CoordTypeVO displayCoordType) {
+    private RouteMapPayload resolveRouteMapPayload(Trip trip, CoordTypeVO displayCoordType,
+                                                    List<TripSegment> segments, List<TrackPoint> trackPoints) {
         RouteMapPayload payload = new RouteMapPayload();
         payload.routeSource = "RAW_ONLY";
         payload.routeSyncStatus = "EMPTY";
@@ -908,8 +944,16 @@ public class TripServiceImpl implements TripService {
 
         TripRouteSnapshotPayload selectedPayload = snapshotHasMatched ? snapshotPayload : (latestHasMatched ? latestPayload : null);
         if (selectedPayload != null) {
-            payload.matchedPolyline = buildMatchedPolylineForMap(selectedPayload.getMatchedResults(), displayCoordType);
-            payload.reconstructedPolyline = buildReconstructedPolylineForMap(selectedPayload.getMatchedResults(), displayCoordType);
+            List<MapMatchingResult> matchedResults = selectedPayload.getMatchedResults();
+            payload.matchedPolyline = buildMatchedPolylineForMap(matchedResults, displayCoordType);
+            payload.reconstructedPolyline = buildReconstructedPolylineForMap(matchedResults, displayCoordType);
+            // 当行程有多个 segment 时，按 segment 边界拆分，避免暂停间隔被连线
+            if (segments != null && segments.size() > 1 && trackPoints != null) {
+                payload.matchedSegments = splitMatchedResultsBySegment(
+                        matchedResults, segments, trackPoints, displayCoordType, false);
+                payload.reconstructedSegments = splitMatchedResultsBySegment(
+                        matchedResults, segments, trackPoints, displayCoordType, true);
+            }
             payload.matchingDiagnostics = buildMatchingDiagnostics(selectedPayload);
             if (selectedPayload.getGeneratedAt() != null) {
                 payload.routeGeneratedAt = DateTimeUtils.formatDateTime(new Date(selectedPayload.getGeneratedAt()));
@@ -938,6 +982,73 @@ public class TripServiceImpl implements TripService {
         }
 
         return payload;
+    }
+
+    /**
+     * 按 TripSegment 边界把匹配结果拆分成多段折线，防止暂停间隔被错误连线。
+     * reconstructed=true 时使用重建模式（保留所有路网点）；false 时使用 matched 模式（过滤低置信度点）。
+     */
+    private List<TrackPolylineVO> splitMatchedResultsBySegment(
+            List<MapMatchingResult> results,
+            List<TripSegment> segments,
+            List<TrackPoint> trackPoints,
+            CoordTypeVO displayCoordType,
+            boolean reconstructed) {
+        if (results == null || results.isEmpty()) return null;
+
+        // trackPointId → segmentId
+        Map<Long, Long> tpToSeg = new HashMap<>();
+        if (trackPoints != null) {
+            for (TrackPoint tp : trackPoints) {
+                if (tp.getId() != null && tp.getSegmentId() != null) {
+                    tpToSeg.put(tp.getId(), tp.getSegmentId());
+                }
+            }
+        }
+        // segmentId → segmentNo
+        Map<Long, Integer> segToNo = new HashMap<>();
+        if (segments != null) {
+            for (TripSegment seg : segments) {
+                if (seg.getId() != null && seg.getSegmentNo() != null) {
+                    segToNo.put(seg.getId(), seg.getSegmentNo());
+                }
+            }
+        }
+
+        List<TrackPolylineVO> segmentPolylines = new ArrayList<>();
+        Long currentSegId = null;
+        List<MapMatchingResult> currentGroup = new ArrayList<>();
+
+        for (MapMatchingResult r : results) {
+            Long segId = r.getTrackPointId() != null ? tpToSeg.get(r.getTrackPointId()) : null;
+            if (!Objects.equals(segId, currentSegId)) {
+                if (!currentGroup.isEmpty()) {
+                    addMatchedGroupAsPolyline(segmentPolylines, currentGroup, currentSegId, segToNo, displayCoordType, reconstructed);
+                }
+                currentSegId = segId;
+                currentGroup = new ArrayList<>();
+            }
+            currentGroup.add(r);
+        }
+        if (!currentGroup.isEmpty()) {
+            addMatchedGroupAsPolyline(segmentPolylines, currentGroup, currentSegId, segToNo, displayCoordType, reconstructed);
+        }
+        return segmentPolylines.isEmpty() ? null : segmentPolylines;
+    }
+
+    private void addMatchedGroupAsPolyline(List<TrackPolylineVO> target,
+                                            List<MapMatchingResult> group,
+                                            Long segId,
+                                            Map<Long, Integer> segToNo,
+                                            CoordTypeVO displayCoordType,
+                                            boolean reconstructed) {
+        TrackPolylineVO polyline = reconstructed
+                ? buildReconstructedPolylineForMap(group, displayCoordType)
+                : buildMatchedPolylineForMap(group, displayCoordType);
+        if (polyline == null || polyline.getPoints() == null || polyline.getPoints().isEmpty()) return;
+        int segNo = (segId != null && segToNo.containsKey(segId)) ? segToNo.get(segId) : target.size() + 1;
+        polyline.setSegmentNo(segNo);
+        target.add(polyline);
     }
 
     private Map<String, Object> buildMatchingDiagnostics(TripRouteSnapshotPayload payload) {
@@ -2123,6 +2234,13 @@ public class TripServiceImpl implements TripService {
     private void runFinalizeTrip(Long tripId) {
         try {
             settleTrip(tripId);
+            // settleTrip 已完成并提交（状态变为 FINISHED），再执行耗时操作，不阻塞事务
+            performMapMatching(tripId);
+            try {
+                tripRouteSnapshotService.finalizeFinishedTrip(tripId);
+            } catch (Exception e) {
+                log.warn("[TRIP_FINALIZE_ASYNC] finalizeFinishedTrip failed tripId={}: {}", tripId, e.getMessage(), e);
+            }
         } catch (Exception e) {
             log.error("[TRIP_FINALIZE_ASYNC] tripId={} failed: {}", tripId, e.getMessage(), e);
             tripRepository.findById(tripId).ifPresent(t -> {
