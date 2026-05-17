@@ -76,6 +76,17 @@ public class AiServiceImpl implements AiService {
         List<PlaceSummary> places = placeSummaryRepository.findByTripId(tripId);
         Long photoCount = photoRepository.countByTripId(tripId);
         Long videoCount = videoRepository.countByTripId(tripId);
+        Long noteCount = tripNoteRepository.countByTripId(tripId);
+        Long storyBlockCount = storyBlockRepository.countByTripId(tripId);
+        Long trackPointCount = trackPointRepository.countByTripId(tripId);
+        List<TripNote> notes = tripNoteRepository.findByTripIdOrderByCreatedAtDesc(tripId);
+        List<StoryBlock> storyBlocks = storyBlockRepository.findByTripIdOrderBySortTimeAscSortIndexAsc(tripId);
+
+        if (isTripSummaryDataInsufficient(places, photoCount, videoCount, noteCount, trackPointCount)) {
+            Map<String, Object> summary = buildInsufficientDataSummary(tripId, userPrompt);
+            saveTripAiSummary(tripId, trip.getUserId(), summary, null, asString(summary.get("userPrompt")));
+            return summary;
+        }
 
         Map<String, Object> tripData = new HashMap<>();
         tripData.put("tripId", tripId);
@@ -91,6 +102,13 @@ public class AiServiceImpl implements AiService {
                 .filter(s -> !s.isEmpty())
                 .distinct()
                 .collect(Collectors.joining(", ")));
+        tripData.put("photoCount", photoCount == null ? 0L : photoCount);
+        tripData.put("videoCount", videoCount == null ? 0L : videoCount);
+        tripData.put("noteCount", noteCount == null ? 0L : noteCount);
+        tripData.put("storyBlockCount", storyBlockCount == null ? 0L : storyBlockCount);
+        tripData.put("trackPointCount", trackPointCount == null ? 0L : trackPointCount);
+        tripData.put("notes", summarizeNotes(notes));
+        tripData.put("storyBlocks", summarizeStoryBlocks(storyBlocks));
 
         PlaceSummary longestStay = places.stream()
                 .max(Comparator.comparingLong((PlaceSummary p) -> p.getDurationSec() == null ? 0L : p.getDurationSec()))
@@ -111,9 +129,76 @@ public class AiServiceImpl implements AiService {
         summary.put("generatedAt", new Date());
         summary.put("version", "v1.0");
         summary.put("userPrompt", effectivePrompt);
+        summary.put("dataSufficient", true);
 
         saveTripAiSummary(tripId, trip.getUserId(), summary, null, effectivePrompt);
         return summary;
+    }
+
+    private boolean isTripSummaryDataInsufficient(List<PlaceSummary> places,
+                                                  Long photoCount,
+                                                  Long videoCount,
+                                                  Long noteCount,
+                                                  Long trackPointCount) {
+        return (places == null || places.isEmpty())
+                && (photoCount == null || photoCount == 0)
+                && (videoCount == null || videoCount == 0)
+                && (noteCount == null || noteCount == 0)
+                && (trackPointCount == null || trackPointCount < 3);
+    }
+
+    private Map<String, Object> buildInsufficientDataSummary(Long tripId, String userPrompt) {
+        String effectivePrompt = (userPrompt != null && !userPrompt.isBlank()) ? userPrompt.trim() : null;
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("tripId", tripId);
+        summary.put("overview", "当前行程记录数据较少，暂无法生成具有参考价值的旅行总结。建议补充轨迹、地点、照片或笔记后重新生成。");
+        summary.put("highlights", Collections.emptyList());
+        summary.put("routeSummary", "行程数据不足，暂未形成可总结的路线内容。");
+        summary.put("bestMoment", "补充旅行记录后，系统将重新识别值得回看的片段。");
+        summary.put("generatedAt", new Date());
+        summary.put("version", "v1.0");
+        summary.put("userPrompt", effectivePrompt);
+        summary.put("dataSufficient", false);
+        return summary;
+    }
+
+    private String summarizeNotes(List<TripNote> notes) {
+        if (notes == null || notes.isEmpty()) {
+            return "";
+        }
+        return notes.stream()
+                .filter(Objects::nonNull)
+                .limit(3)
+                .map(note -> {
+                    String title = note.getTitle() == null ? "" : note.getTitle().trim();
+                    String content = note.getContent() == null ? "" : note.getContent().trim();
+                    if (!title.isEmpty() && !content.isEmpty()) {
+                        return title + "：" + content;
+                    }
+                    return !content.isEmpty() ? content : title;
+                })
+                .filter(text -> text != null && !text.isBlank())
+                .collect(Collectors.joining("；"));
+    }
+
+    private String summarizeStoryBlocks(List<StoryBlock> storyBlocks) {
+        if (storyBlocks == null || storyBlocks.isEmpty()) {
+            return "";
+        }
+        return storyBlocks.stream()
+                .filter(Objects::nonNull)
+                .filter(block -> !Boolean.TRUE.equals(block.getIsHidden()))
+                .limit(5)
+                .map(block -> {
+                    String title = block.getTitle() == null ? "" : block.getTitle().trim();
+                    String content = block.getTextContent() == null ? "" : block.getTextContent().trim();
+                    if (!title.isEmpty() && !content.isEmpty()) {
+                        return title + "：" + content;
+                    }
+                    return !content.isEmpty() ? content : title;
+                })
+                .filter(text -> text != null && !text.isBlank())
+                .collect(Collectors.joining("；"));
     }
 
     @Override

@@ -131,13 +131,32 @@ public class AiApiClient {
         prompt.append("途经地点：").append(tripData.getOrDefault("places", "未知地点")).append("\n");
         prompt.append("行程距离：").append(tripData.getOrDefault("distanceText", "未知距离")).append("\n");
         prompt.append("行程时长：").append(tripData.getOrDefault("durationText", "未知时长")).append("\n");
+        prompt.append("轨迹点数量：").append(tripData.getOrDefault("trackPointCount", 0)).append("\n");
+        prompt.append("媒体数量：照片 ").append(tripData.getOrDefault("photoCount", 0))
+                .append(" 张，视频 ").append(tripData.getOrDefault("videoCount", 0)).append(" 个\n");
+        prompt.append("笔记数量：").append(tripData.getOrDefault("noteCount", 0)).append("\n");
+        prompt.append("故事流块数量：").append(tripData.getOrDefault("storyBlockCount", 0)).append("\n");
         if (tripData.containsKey("longestStayPlace")) {
             prompt.append("停留最久的地点：").append(tripData.get("longestStayPlace"))
                   .append("（").append(tripData.getOrDefault("longestStayDuration", "")).append("）\n");
         }
+        appendOptionalPromptLine(prompt, "旅行笔记摘录", tripData.get("notes"));
+        appendOptionalPromptLine(prompt, "故事流摘录", tripData.get("storyBlocks"));
         prompt.append("\n【写作要求】\n").append(styleInstruction).append("\n");
+        prompt.append("\n只围绕以上真实行程数据写作，不要编造不存在的地点、人物或事件。");
         prompt.append("\n只输出总结正文，不要加标题、编号或额外说明。");
         return prompt.toString();
+    }
+
+    private void appendOptionalPromptLine(StringBuilder prompt, String label, Object value) {
+        if (value == null) {
+            return;
+        }
+        String text = String.valueOf(value).trim();
+        if (text.isEmpty()) {
+            return;
+        }
+        prompt.append(label).append("：").append(text).append("\n");
     }
 
     /**

@@ -53,15 +53,11 @@ public class RoadGraphService {
         List<TileKey> requiredTiles = resolveTiles(window.haloBox, context.resourcePath);
         int cacheHits = 0;
         int cacheMisses = 0;
+        RoadGraph windowGraph = new RoadGraph();
         log.warn("[ROAD_GRAPH_WINDOW] window={} pointRange={}..{} requiredTiles={} headingDeg={}",
                 window.getIndex(), window.getStartIndex(), window.getEndIndex(), requiredTiles.size(),
                 window.getHeadingDegrees() == null ? "-" : String.format(Locale.ROOT, "%.1f", window.getHeadingDegrees()));
         for (TileKey key : requiredTiles) {
-            if (context.loadedTileKeys.contains(key.cacheKey)) {
-                cacheHits++;
-                continue;
-            }
-
             RoadGraph tileGraph = tileCache.get(key.cacheKey);
             if (tileGraph == null) {
                 cacheMisses++;
@@ -88,17 +84,18 @@ public class RoadGraphService {
 
             context.tileGraphs.put(key.cacheKey, tileGraph);
             context.loadedTileKeys.add(key.cacheKey);
-            context.mergedGraph = merge(context.mergedGraph, tileGraph);
+            windowGraph = merge(windowGraph, tileGraph);
         }
+        context.mergedGraph = windowGraph;
         log.warn("[ROAD_GRAPH_WINDOW] window={} loadedTileKeys={} cacheHits={} cacheMisses={} mergedSegments={} mergedJunctions={} mergedRestrictions={}",
                 window.getIndex(),
                 context.loadedTileKeys == null ? 0 : context.loadedTileKeys.size(),
                 cacheHits,
                 cacheMisses,
-                context.mergedGraph.getSegments() == null ? 0 : context.mergedGraph.getSegments().size(),
-                context.mergedGraph.getJunctions() == null ? 0 : context.mergedGraph.getJunctions().size(),
-                context.mergedGraph.getRestrictions() == null ? 0 : context.mergedGraph.getRestrictions().size());
-        return context.mergedGraph;
+                windowGraph.getSegments() == null ? 0 : windowGraph.getSegments().size(),
+                windowGraph.getJunctions() == null ? 0 : windowGraph.getJunctions().size(),
+                windowGraph.getRestrictions() == null ? 0 : windowGraph.getRestrictions().size());
+        return windowGraph;
     }
 
     public RoadGraph expandForward(LoadContext context, int windowIndex, Double headingDegrees) {
@@ -110,12 +107,9 @@ public class RoadGraphService {
         List<TileKey> requiredTiles = resolveTiles(expanded, context.resourcePath);
         int cacheHits = 0;
         int cacheMisses = 0;
+        RoadGraph expandedGraph = new RoadGraph();
         log.warn("[ROAD_GRAPH_EXPAND] window={} headingDeg={} requiredTiles={}", window.getIndex(), headingDegrees, requiredTiles.size());
         for (TileKey key : requiredTiles) {
-            if (context.loadedTileKeys.contains(key.cacheKey)) {
-                cacheHits++;
-                continue;
-            }
             RoadGraph tileGraph = tileCache.get(key.cacheKey);
             if (tileGraph == null) {
                 cacheMisses++;
@@ -142,16 +136,17 @@ public class RoadGraphService {
 
             context.tileGraphs.put(key.cacheKey, tileGraph);
             context.loadedTileKeys.add(key.cacheKey);
-            context.mergedGraph = merge(context.mergedGraph, tileGraph);
+            expandedGraph = merge(expandedGraph, tileGraph);
         }
+        context.mergedGraph = expandedGraph;
         log.warn("[ROAD_GRAPH_EXPAND] window={} cacheHits={} cacheMisses={} mergedSegments={} mergedJunctions={} mergedRestrictions={}",
                 window.getIndex(),
                 cacheHits,
                 cacheMisses,
-                context.mergedGraph.getSegments() == null ? 0 : context.mergedGraph.getSegments().size(),
-                context.mergedGraph.getJunctions() == null ? 0 : context.mergedGraph.getJunctions().size(),
-                context.mergedGraph.getRestrictions() == null ? 0 : context.mergedGraph.getRestrictions().size());
-        return context.mergedGraph;
+                expandedGraph.getSegments() == null ? 0 : expandedGraph.getSegments().size(),
+                expandedGraph.getJunctions() == null ? 0 : expandedGraph.getJunctions().size(),
+                expandedGraph.getRestrictions() == null ? 0 : expandedGraph.getRestrictions().size());
+        return expandedGraph;
     }
 
     private List<Window> buildWindows(List<GeoCoord> points, int windowPointCount, int overlapPointCount) {

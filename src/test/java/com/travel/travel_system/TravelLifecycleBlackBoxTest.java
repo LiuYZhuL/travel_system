@@ -145,7 +145,7 @@ class TravelLifecycleBlackBoxTest {
     @Test
     void shouldCompleteCoreTravelLifecycleThroughApis() throws Exception {
         User user = createTestUser("lifecycle");
-        String token = jwtUtils.generateToken(user.getOpenId());
+        String token = jwtUtils.generateAccessToken(user.getOpenId());
 
         JsonNode createTrip = requestJson(
                 HttpMethod.POST,
@@ -277,7 +277,7 @@ class TravelLifecycleBlackBoxTest {
     @Test
     void shouldRejectUnauthenticatedRequestsAndIsolateUserTrips() throws Exception {
         User owner = createTestUser("owner");
-        String ownerToken = jwtUtils.generateToken(owner.getOpenId());
+        String ownerToken = jwtUtils.generateAccessToken(owner.getOpenId());
 
         JsonNode createTrip = requestJson(
                 HttpMethod.POST,
@@ -299,7 +299,7 @@ class TravelLifecycleBlackBoxTest {
         assertEquals("AUTH_001", unauthenticated.path("code").asText());
 
         User outsider = createTestUser("outsider");
-        String outsiderToken = jwtUtils.generateToken(outsider.getOpenId());
+        String outsiderToken = jwtUtils.generateAccessToken(outsider.getOpenId());
 
         JsonNode outsiderDetail = requestJson(HttpMethod.GET, "/api/v1/trips/" + tripId + "/detail", outsiderToken, null, HttpStatus.OK);
         assertEquals("SYSTEM_500", outsiderDetail.path("code").asText());

@@ -94,6 +94,8 @@ public class TrackPointServiceImpl implements TrackPointService {
     private static final double BOUNDARY_EXPAND_METERS = 800.0;
 
     private static final String CHINA_PBF = "static/pbf/china-260317.osm.pbf";
+    private static final String BEIJING_PBF = "static/pbf/beijing-260321.osm.pbf";
+    private static final String HUBEI_PBF = "static/pbf/hubei-260321.osm.pbf";
     private static final String HENAN_PBF = "static/pbf/henan-260321.osm.pbf";
 
     /** 中国大陆 + 港澳台 + 南海诸岛的粗略外接矩形（WGS-84） */
@@ -2559,6 +2561,12 @@ public class TrackPointServiceImpl implements TrackPointService {
         }
         if (avgLat >= 31.4 && avgLat <= 36.4 && avgLon >= 110.4 && avgLon <= 116.6) {
             return HENAN_PBF;
+        }
+        if (avgLat >= 39.4 && avgLat <= 41.1 && avgLon >= 115.4 && avgLon <= 117.6) {
+            return BEIJING_PBF;
+        }
+        if (avgLat >= 29.0 && avgLat <= 33.4 && avgLon >= 108.3 && avgLon <= 116.2) {
+            return HUBEI_PBF;
         }
         return CHINA_PBF;
     }
